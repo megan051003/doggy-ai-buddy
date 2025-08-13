@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <style>
+      #imgPreview { max-width: 100%; max-height: 300px; margin-top: 10px; border: 1px solid #ccc; }
+      #userQuestion { width: 100%; margin-top: 10px; padding: 5px; }
+      #answer { margin-top: 10px; white-space: pre-wrap; }
+      button { margin-top: 5px; }
+      body { min-width: 350px; padding: 10px; }
+    </style>
+  </head>
+  <body>
+    <button id="captureBtn">Capture Screenshot</button>
+    <img id="imgPreview" alt="Screenshot preview will appear here" />
+    <br/>
+    <input id="userQuestion" placeholder="Ask a question..." />
+    <button id="askBtn">Ask Doggy AI</button>
+    <div id="answer">Answer will appear here</div>
+    <script src="popup.js"></script>
+  </body>
+</html>
+
