@@ -84,4 +84,3 @@ app.post("/ask", async (req, res) => {
 app.listen(port, () => {
   console.log(`Doggy AI Buddy backend listening at http://localhost:${port}`);
 });
-

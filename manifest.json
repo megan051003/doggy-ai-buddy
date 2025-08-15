@@ -6,15 +6,24 @@
   "action": {
     "default_popup": "src/popup.html"
   },
-  "permissions": ["tabs", "activeTab", "scripting"],
+  "permissions": ["tabs", "storage"],
+  "host_permissions": [
+    "http://localhost:4000/*"  // Corrected to port 4000 to match your server.js
+  ],
   "content_scripts": [
     {
-      "matches": ["*://*.ngrok-free.app/workflow/*"],
-      "js": ["src/content.js"]
+      "matches": [
+        "https://caribou-driven-anchovy.ngrok-free.app/workflow/*",
+        "*://*.ngrok-free.app/workflow/*",
+        "*://localhost:*/workflow/*",
+        "*://*.n8n.cloud/workflow/*",
+        "*://*.n8n.io/workflow/*"
+      ],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
     }
   ],
   "background": {
     "service_worker": "src/background.js"
   }
 }
-

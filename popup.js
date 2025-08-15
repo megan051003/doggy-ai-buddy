@@ -8,25 +8,15 @@ document.getElementById('captureBtn').addEventListener('click', () => {
   });
 });
 
-async function askDoggyAI(question, context) {
-  const response = await fetch("http://localhost:4000/ask", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, context }),
-  });
-  const data = await response.json();
-  return data.answer || "No answer received";
-}
-
 document.getElementById('askBtn').addEventListener('click', async () => {
   const question = document.getElementById('userQuestion').value;
+  document.getElementById('answer').innerText = "Thinking...";
 
-  // Get active tab
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const tab = tabs[0];
     if (!tab) return;
 
-    // Send message to content script
+    // Step 1: Send message to content script to get DOM snapshot
     chrome.tabs.sendMessage(tab.id, { type: "ASK_HELP" }, async (response) => {
       if (chrome.runtime.lastError) {
         console.error('Message failed:', chrome.runtime.lastError.message);
@@ -35,14 +25,16 @@ document.getElementById('askBtn').addEventListener('click', async () => {
       }
 
       const snapshot = response?.snapshot || [];
-      const contextText = snapshot.map(el => {
-        const name = el.dataTestId || el.text || el.tagName;
-        return name;
-      }).join("\n");
-
-      const answer = await askDoggyAI(question, contextText);
-      document.getElementById('answer').innerText = answer;
+      
+      // Step 2: Send the DOM snapshot and question to the background script
+      chrome.runtime.sendMessage({ type: "PROCESS_WITH_LLM", question: question, snapshot: snapshot }, (llmResponse) => {
+        if (llmResponse && llmResponse.answer) {
+          // Step 3: Display the LLM's response
+          document.getElementById('answer').innerText = llmResponse.answer;
+        } else {
+          document.getElementById('answer').innerText = llmResponse.error || "No answer received.";
+        }
+      });
     });
   });
 });
-
