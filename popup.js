@@ -1,48 +1,78 @@
-document.getElementById('captureBtn').addEventListener('click', () => {
-  chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
-    if (chrome.runtime.lastError) {
-      alert('Screenshot failed: ' + chrome.runtime.lastError.message);
-      return;
+document.addEventListener('DOMContentLoaded', () => {
+    // Variable to store conversation history
+    const conversationHistory = [];
+
+    // Function to display messages in the chat UI
+    function displayMessage(sender, text) {
+        const chatContainer = document.getElementById('chatContainer');
+        const messageDiv = document.createElement('div');
+        messageDiv.classList.add('message');
+        if (sender === 'user') {
+            messageDiv.classList.add('user-message');
+        } else {
+            messageDiv.classList.add('ai-message');
+        }
+        messageDiv.innerText = text;
+        chatContainer.appendChild(messageDiv);
+        chatContainer.scrollTop = chatContainer.scrollHeight;
     }
-    document.getElementById('imgPreview').src = dataUrl;
-  });
-});
 
-async function askDoggyAI(question, context) {
-  const response = await fetch("http://localhost:4000/ask", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, context }),
-  });
-  const data = await response.json();
-  return data.answer || "No answer received";
-}
+    document.getElementById('askBtn').addEventListener('click', async () => {
+        const question = document.getElementById('userQuestion').value;
+        if (!question.trim()) return;
 
-document.getElementById('askBtn').addEventListener('click', async () => {
-  const question = document.getElementById('userQuestion').value;
+        // Display user's question and clear the input
+        displayMessage('user', question);
+        document.getElementById('userQuestion').value = '';
 
-  // Get active tab
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const tab = tabs[0];
-    if (!tab) return;
+        // Add user message to history
+        conversationHistory.push({
+            role: "user",
+            parts: [{ text: question }]
+        });
+        
+        // Display "Thinking..." message
+        const thinkingMessage = "Thinking...";
+        displayMessage('ai', thinkingMessage);
+        
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+            const tab = tabs[0];
+            if (!tab) return;
 
-    // Send message to content script
-    chrome.tabs.sendMessage(tab.id, { type: "ASK_HELP" }, async (response) => {
-      if (chrome.runtime.lastError) {
-        console.error('Message failed:', chrome.runtime.lastError.message);
-        document.getElementById('answer').innerText = "Content script not loaded. Refresh n8n page.";
-        return;
-      }
+            // Step 1: Send message to content script to get DOM snapshot
+            chrome.tabs.sendMessage(tab.id, { type: "ASK_HELP" }, async (response) => {
+                const chatContainer = document.getElementById('chatContainer');
+                
+                if (chrome.runtime.lastError) {
+                    console.error('Message failed:', chrome.runtime.lastError.message);
+                    chatContainer.removeChild(chatContainer.lastChild); // Remove "Thinking..." message
+                    displayMessage('ai', "Content script not loaded. Refresh n8n page.");
+                    return;
+                }
 
-      const snapshot = response?.snapshot || [];
-      const contextText = snapshot.map(el => {
-        const name = el.dataTestId || el.text || el.tagName;
-        return name;
-      }).join("\n");
-
-      const answer = await askDoggyAI(question, contextText);
-      document.getElementById('answer').innerText = answer;
+                const snapshot = response?.snapshot || [];
+                
+                // Step 2: Send the DOM snapshot, question, and history to the background script
+                chrome.runtime.sendMessage({
+                    type: "PROCESS_WITH_LLM",
+                    question: question,
+                    snapshot: snapshot,
+                    history: conversationHistory
+                }, (llmResponse) => {
+                    chatContainer.removeChild(chatContainer.lastChild); // Remove "Thinking..." message
+                    
+                    if (llmResponse && llmResponse.answer) {
+                        // Add AI message to history and display it
+                        conversationHistory.push({
+                            role: "model",
+                            parts: [{ text: llmResponse.answer }]
+                        });
+                        displayMessage('ai', llmResponse.answer);
+                    } else {
+                        displayMessage('ai', llmResponse.error || "No answer received.");
+                    }
+                });
+            });
+        });
     });
-  });
 });
-
