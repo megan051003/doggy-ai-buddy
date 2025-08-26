@@ -3,13 +3,13 @@
   "name": "Doggy AI Buddy",
   "version": "1.0",
   "description": "AI assistant for n8n workflows",
-  "action": {
-    "default_popup": "src/popup.html"
-  },
-  "permissions": ["tabs", "storage"],
+  "permissions": ["tabs", "storage", "sidePanel"],
   "host_permissions": [
-    "http://localhost:4000/*"  // Corrected to port 4000 to match your server.js
+    "http://localhost:4000/*"
   ],
+  "side_panel": {
+    "default_path": "src/sidepanel.html"
+  },
   "content_scripts": [
     {
       "matches": [
