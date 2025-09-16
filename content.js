@@ -1,30 +1,51 @@
 console.log("Doggy AI Buddy content script loaded");
-alert("Content script loaded!");
 
+(async () => {
+  // Dynamically import helper modules
+  const { createChatUI, displayMessage } = await import(chrome.runtime.getURL("src/chatUI.js"));
+  const { initializeInputListeners, getDOMSnapshot } = await import(chrome.runtime.getURL("src/domWatcher.js"));
+  const { makeDraggable } = await import(chrome.runtime.getURL("src/dragHandler.js"));
 
-// Function to capture all visible DOM elements on page
-function getDOMSnapshot() {
-  const allElements = Array.from(document.querySelectorAll("body *"));
-  const relevantElements = allElements.filter(el =>
-    (el.innerText && el.innerText.trim().length > 0) || el.getAttribute("data-test-id")
-  );
+  // --- Setup UI ---
+  const container = createChatUI();
+  const chatContainer = container.querySelector("#chatContainer");
+  const input = container.querySelector("#userQuestion");
+  const askBtn = container.querySelector("#askBtn");
+  const dragHandle = container.querySelector("#drag-handle");
 
-  const snapshot = relevantElements.map(el => ({
-    tagName: el.tagName,
-    text: el.innerText ? el.innerText.trim() : '',
-    dataTestId: el.getAttribute("data-test-id"),
-    className: el.className
-  }));
+  makeDraggable(container, dragHandle);
 
-  return snapshot;
-}
+  // Conversation state
+  const conversationHistory = [];
 
-// Listen for messages from popup
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.type === "ASK_HELP") {
+  // Handle "Ask" button
+  askBtn.addEventListener("click", () => {
+    const question = input.value;
+    if (!question.trim()) return;
+
+    displayMessage(container, "user", question);
+    input.value = "";
+    conversationHistory.push({ role: "user", parts: [{ text: question }] });
+    displayMessage(container, "ai", "Thinking...");
+
     const snapshot = getDOMSnapshot();
-    sendResponse({ snapshot }); // immediately respond
-    return true; // keep channel open
-  }
-});
 
+    chrome.runtime.sendMessage(
+      { type: "PROCESS_WITH_LLM", question, snapshot, history: conversationHistory },
+      (llmResponse) => {
+        chatContainer.removeChild(chatContainer.lastChild); // remove "Thinking..."
+        if (llmResponse?.answer && llmResponse.answer.trim()) {
+          conversationHistory.push({ role: "model", parts: [{ text: llmResponse.answer }] });
+          displayMessage(container, "ai", llmResponse.answer);
+        } else {
+          displayMessage(container, "ai", llmResponse.error || "Doggy didn’t know what to say 🐾");
+        }
+      }
+    );
+  });
+
+  // Input listeners for DOM snapshot
+  window.addEventListener("load", () => {
+    initializeInputListeners(document.querySelectorAll("input, textarea"));
+  });
+})();
