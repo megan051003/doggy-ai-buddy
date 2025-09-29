@@ -13,7 +13,7 @@ const app = express();
 const port = process.env.PORT || 4000;
 
 app.use(cors());
-app.use(bodyParser.json({ limit: "2mb" })); // allow bigger context payloads
+app.use(bodyParser.json({ limit: "2mb" }));
 
 // 🐶 Toggle: include DOM snapshot in prompt?
 const USE_DOM_CONTEXT = true;
@@ -22,6 +22,12 @@ const USE_DOM_CONTEXT = true;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const nodesPath = path.join(__dirname, "active_nodes_summary.json");
+
+// ✅ Sanitize sensitive tokens/keys from error messages
+function sanitizeError(msg) {
+  if (!msg) return null;
+  return msg.replace(/(key|token|secret|password)[^\s]*/gi, "[REDACTED]");
+}
 
 // ✅ Reads local JSON cleanly
 async function getAvailableNodes() {
@@ -81,18 +87,16 @@ async function queryGemini(promptText, history) {
   }
 }
 
-// ✅ Summarize Workflow (Day 8)
+// ✅ Summarize Workflow (with Broken Reference Detection)
 app.post("/summarizeWorkflow", async (req, res) => {
   try {
     const { workflowId, baseUrl, apiKey } = req.body;
-
     if (!workflowId || !baseUrl || !apiKey) {
       return res
         .status(400)
         .json({ error: "workflowId, baseUrl, and apiKey are required" });
     }
 
-    // Fetch workflow JSON from n8n
     const response = await fetch(`${baseUrl}/api/v1/workflows/${workflowId}`, {
       headers: { "X-N8N-API-KEY": apiKey },
     });
@@ -106,13 +110,13 @@ app.post("/summarizeWorkflow", async (req, res) => {
 
     const workflow = await response.json();
 
-    // Build a compact summary
+    // Collect nodes
     const nodes =
       workflow.nodes?.map(
         (n) => `- name: ${n.name}, type: ${n.type}, id: ${n.id}`
       ) || [];
 
-    // ✅ safer connections mapping
+    // Collect connections
     let connections = [];
     if (workflow.connections) {
       for (const [src, targetGroups] of Object.entries(workflow.connections)) {
@@ -126,6 +130,23 @@ app.post("/summarizeWorkflow", async (req, res) => {
       }
     }
 
+    // ✅ Broken reference detection
+    const nodeNames = new Set(workflow.nodes?.map((n) => n.name));
+    let brokenRefs = [];
+    if (workflow.connections) {
+      for (const [src, targetGroups] of Object.entries(workflow.connections)) {
+        if (targetGroups?.main) {
+          for (const group of targetGroups.main) {
+            for (const t of group) {
+              if (!nodeNames.has(t.node)) {
+                brokenRefs.push(`${src} → ${t.node} (missing)`);
+              }
+            }
+          }
+        }
+      }
+    }
+
     const summary = `
 Workflow: ${workflow.name} (active: ${workflow.active})
 Nodes:
@@ -133,6 +154,9 @@ ${nodes.join("\n")}
 
 Connections:
 ${connections.length ? connections.join("\n") : "No connections"}
+
+Broken References:
+${brokenRefs.length ? brokenRefs.join("\n") : "None 🎉"}
     `.trim();
 
     res.json({ summary, workflow });
@@ -142,10 +166,60 @@ ${connections.length ? connections.join("\n") : "No connections"}
   }
 });
 
+// ✅ Get ONLY the latest execution log
+app.post("/getExecutionLogs", async (req, res) => {
+  try {
+    const { workflowId, baseUrl, apiKey } = req.body;
+    if (!workflowId || !baseUrl || !apiKey) {
+      return res
+        .status(400)
+        .json({ error: "workflowId, baseUrl, and apiKey are required" });
+    }
+
+    const url = `${baseUrl}/api/v1/executions?workflowId=${workflowId}&status=error&limit=1&includeData=true`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { "X-N8N-API-KEY": apiKey },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return res
+        .status(response.status)
+        .json({ error: `Logs request failed: ${text}` });
+    }
+
+    const data = await response.json();
+    const latestExec = data.data?.[0];
+
+    const logs = latestExec
+      ? [
+          {
+            id: latestExec.id,
+            status: latestExec.status,
+            startedAt: latestExec.startedAt,
+            stoppedAt: latestExec.stoppedAt,
+            error: sanitizeError(
+              latestExec.error?.message ||
+                latestExec.data?.resultData?.error?.message ||
+                null
+            ),
+            node: latestExec.data?.resultData?.error?.node || null,
+          },
+        ]
+      : [];
+
+    res.json({ logs });
+  } catch (error) {
+    console.error("Error fetching execution logs:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ✅ Main /ask endpoint
 app.post("/ask", async (req, res) => {
   try {
-    const { question, context, workflowSummary } = req.body;
+    const { question, context, workflowSummary, executionLogs } = req.body;
     const history = req.body.history || [];
 
     if (!question) {
@@ -154,32 +228,28 @@ app.post("/ask", async (req, res) => {
 
     const availableNodes = await getAvailableNodes();
 
-    // Build prompt dynamically
     const prompt = `
 You are Doggy AI Buddy 🐶, an assistant that helps users debug and build n8n workflows.
 
 ERROR FIXING:
-- Always point out what the user personally entered incorrectly (based on context snapshot).
-- Do not give generic advice.
-- Use the provided node JSON list; never suggest nodes that aren't in the list.
-
-WORKFLOW BUILDING:
-- Guide step by step.
-- Use UI context (buttons, fields) to reference where to click.
-- When suggesting a node, include the full JSON definition from the availableNodes list.
+- Always combine DOM error hints with the *latest* execution log for full context.
+- Check workflow summary for broken references (nodes missing in connections).
+- Always point out what the user personally entered incorrectly.
 
 WORKFLOW SUMMARY (from JSON):
 ${workflowSummary || "No workflow context provided."}
+
+LATEST EXECUTION LOG:
+${executionLogs?.[0] ? JSON.stringify(executionLogs[0], null, 2) : "No recent execution log available."}
 
 ${
   USE_DOM_CONTEXT
     ? `📋 Page context (DOM snapshot):
 ${JSON.stringify(context, null, 2)}`
-    : "📋 DOM snapshot: skipped in this mode."
+    : "📋 DOM snapshot skipped."
 }
 
 ---
-
 💬 User question: ${question}
 
 🧩 Available nodes:
