@@ -10,13 +10,14 @@ async function getApiKey(service) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // 🐶 LLM processing with workflow summary + logs
+  // 🐶 LLM processing with workflow summary + logs + webhook health
   if (request.type === "PROCESS_WITH_LLM") {
     (async () => {
       try {
         const apiKey = await getApiKey("n8n");
         let workflowSummary = null;
         let executionLogs = null;
+        let webhookHealth = null;
 
         // Load debug toggle state
         const { debugMode } = await new Promise((resolve) =>
@@ -71,6 +72,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           } else {
             console.log("⚡ Debug Mode OFF — skipping execution logs.");
           }
+
+          // 🐾 Webhook health check
+          try {
+            const wfRes = await fetch(`${request.baseUrl}/api/v1/workflows/${request.workflowId}`, {
+              headers: { "X-N8N-API-KEY": apiKey }
+            });
+
+            if (wfRes.ok) {
+              const workflowJson = await wfRes.json();
+              const webhookNodes = workflowJson.nodes?.filter(
+                (n) => n.type === "n8n-nodes-base.webhook"
+              );
+
+              webhookHealth = [];
+
+              for (const node of webhookNodes) {
+                const webhookUrl = node.parameters?.path
+                  ? `${request.baseUrl}/webhook/${node.parameters.path}`
+                  : null;
+
+                if (webhookUrl) {
+                  console.log("🐾 Checking webhook:", webhookUrl);
+
+                  const healthRes = await fetch("http://localhost:4000/checkWebhook", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ url: webhookUrl })
+                  });
+
+                  if (healthRes.ok) {
+                    const result = await healthRes.json();
+                    webhookHealth.push({
+                      node: node.name,
+                      url: webhookUrl,
+                      ...result
+                    });
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            console.error("❌ Webhook health check failed:", err);
+          }
         }
 
         // ✅ Call /ask with everything
@@ -82,7 +126,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             context: request.snapshot,
             history: request.history,
             workflowSummary,
-            executionLogs
+            executionLogs,
+            webhookHealth
           })
         });
 
@@ -109,9 +154,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
 
         const res = await fetch(`${baseUrl}/api/v1/workflows/${workflowId}`, {
-          headers: {
-            "X-N8N-API-KEY": apiKey
-          }
+          headers: { "X-N8N-API-KEY": apiKey }
         });
 
         if (!res.ok) {
@@ -158,6 +201,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ logs });
       } catch (err) {
         console.error("FETCH_LOGS error:", err);
+        sendResponse({ error: err.message });
+      }
+    })();
+    return true;
+  }
+
+  // 🐾 Manual webhook check for sidepanel test
+  if (request.type === "CHECK_WEBHOOK") {
+    (async () => {
+      try {
+        const res = await fetch("http://localhost:4000/checkWebhook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: request.url,
+            headers: request.headers || {}
+          })
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          sendResponse({ error: `Webhook check failed: ${res.status} ${text}` });
+          return;
+        }
+
+        const data = await res.json();
+        sendResponse(data);
+      } catch (err) {
+        console.error("CHECK_WEBHOOK error:", err);
         sendResponse({ error: err.message });
       }
     })();
