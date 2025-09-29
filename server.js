@@ -166,7 +166,7 @@ ${brokenRefs.length ? brokenRefs.join("\n") : "None 🎉"}
   }
 });
 
-// ✅ Get ONLY the latest execution log
+// ✅ Get ONLY the latest execution log (with type mismatch detection)
 app.post("/getExecutionLogs", async (req, res) => {
   try {
     const { workflowId, baseUrl, apiKey } = req.body;
@@ -194,18 +194,38 @@ app.post("/getExecutionLogs", async (req, res) => {
 
     const logs = latestExec
       ? [
-          {
-            id: latestExec.id,
-            status: latestExec.status,
-            startedAt: latestExec.startedAt,
-            stoppedAt: latestExec.stoppedAt,
-            error: sanitizeError(
+          (() => {
+            const rawError =
               latestExec.error?.message ||
-                latestExec.data?.resultData?.error?.message ||
-                null
-            ),
-            node: latestExec.data?.resultData?.error?.node || null,
-          },
+              latestExec.data?.resultData?.error?.message ||
+              null;
+            const sanitizedError = sanitizeError(rawError);
+
+            // 🔍 Type mismatch detection
+            let mismatchHint = null;
+            if (sanitizedError) {
+              if (sanitizedError.includes("iterate over a non-array")) {
+                mismatchHint =
+                  "Array expected, but got string/object.";
+              } else if (sanitizedError.includes("Cannot read properties of undefined")) {
+                mismatchHint =
+                  "Undefined value — check node input fields.";
+              } else if (/expected .* but got/i.test(sanitizedError)) {
+                mismatchHint =
+                  "Data type mismatch — check mapping.";
+              }
+            }
+
+            return {
+              id: latestExec.id,
+              status: latestExec.status,
+              startedAt: latestExec.startedAt,
+              stoppedAt: latestExec.stoppedAt,
+              error: sanitizedError,
+              node: latestExec.data?.resultData?.error?.node || null,
+              typeMismatch: mismatchHint,
+            };
+          })(),
         ]
       : [];
 
@@ -216,7 +236,57 @@ app.post("/getExecutionLogs", async (req, res) => {
   }
 });
 
-// ✅ Main /ask endpoint
+// ✅ Webhook Health Check
+app.post("/checkWebhook", async (req, res) => {
+  try {
+    const { url, headers } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: "Webhook URL is required" });
+    }
+
+    console.log(`🐾 Checking webhook health at: ${url}`);
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: headers || {},
+    });
+
+    if (response.ok) {
+      return res.json({
+        healthy: true,
+        status: response.status,
+        message: "Webhook is healthy ✅",
+      });
+    }
+
+    if (response.status === 401) {
+      return res.json({
+        healthy: false,
+        status: 401,
+        message: "Unauthorized (401). Fix API key or headers.",
+      });
+    }
+
+    if (response.status === 403) {
+      return res.json({
+        healthy: false,
+        status: 403,
+        message: "Forbidden (403). Check permissions.",
+      });
+    }
+
+    return res.json({
+      healthy: false,
+      status: response.status,
+      message: `Webhook responded with status ${response.status}`,
+    });
+  } catch (error) {
+    console.error("❌ Webhook check failed:", error);
+    return res.status(500).json({ healthy: false, error: error.message });
+  }
+});
+
+// ✅ Main /ask endpoint — SHORT + PRECISE Doggy
 app.post("/ask", async (req, res) => {
   try {
     const { question, context, workflowSummary, executionLogs } = req.body;
@@ -229,22 +299,23 @@ app.post("/ask", async (req, res) => {
     const availableNodes = await getAvailableNodes();
 
     const prompt = `
-You are Doggy AI Buddy 🐶, an assistant that helps users debug and build n8n workflows.
+You are Doggy AI Buddy 🐶. Be short, friendly, and precise.
 
-ERROR FIXING:
-- Always combine DOM error hints with the *latest* execution log for full context.
-- Check workflow summary for broken references (nodes missing in connections).
-- Always point out what the user personally entered incorrectly.
+RULES:
+- If node code is visible in the DOM snapshot, point to the exact issue in 2–4 sentences.
+- If node code is NOT visible, do NOT guess. Just say: "Open the node so I can sniff inside 🐶".
+- Never write long paragraphs or generic JavaScript tutorials.
+- Always mention the specific node name causing the issue if known.
 
-WORKFLOW SUMMARY (from JSON):
+WORKFLOW SUMMARY:
 ${workflowSummary || "No workflow context provided."}
 
-LATEST EXECUTION LOG:
-${executionLogs?.[0] ? JSON.stringify(executionLogs[0], null, 2) : "No recent execution log available."}
+EXECUTION LOG:
+${executionLogs?.[0] ? JSON.stringify(executionLogs[0], null, 2) : "No log available."}
 
 ${
   USE_DOM_CONTEXT
-    ? `📋 Page context (DOM snapshot):
+    ? `📋 DOM snapshot:
 ${JSON.stringify(context, null, 2)}`
     : "📋 DOM snapshot skipped."
 }
@@ -252,11 +323,12 @@ ${JSON.stringify(context, null, 2)}`
 ---
 💬 User question: ${question}
 
-🧩 Available nodes:
-${JSON.stringify(availableNodes, null, 2)}
-
-Answer:
+Answer (short + clear):
     `;
+
+    // 🐾 Token usage estimate
+    const tokenEstimate = prompt.split(/\s+/).length;
+    console.log(`🐾 Estimated tokens this round: ${tokenEstimate}`);
 
     const geminiResponse = await queryGemini(prompt, history);
 
@@ -264,7 +336,7 @@ Answer:
       geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
       "No answer received";
 
-    res.json({ answer });
+    res.json({ answer, tokenEstimate });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: error.message });
