@@ -10,36 +10,67 @@ async function getApiKey(service) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // 🐶 Existing LLM processing
+  // 🐶 Day 8: LLM processing with workflow summary
   if (request.type === "PROCESS_WITH_LLM") {
-    fetch("http://localhost:4000/ask", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        question: request.question,
-        context: request.snapshot, // raw DOM snapshot JSON
-        history: request.history
-      })
-    })
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`Network response was not ok: ${response.statusText}`);
+    (async () => {
+      try {
+        const apiKey = await getApiKey("n8n");
+        let workflowSummary = null;
+
+        // If workflowId & baseUrl are known, summarize first
+        if (request.workflowId && request.baseUrl && apiKey) {
+          try {
+            const summaryRes = await fetch("http://localhost:4000/summarizeWorkflow", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                workflowId: request.workflowId,
+                baseUrl: request.baseUrl,
+                apiKey
+              })
+            });
+
+            if (summaryRes.ok) {
+              const { summary } = await summaryRes.json();
+              workflowSummary = summary;
+              console.log("✅ Workflow summary fetched and attached.");
+            } else {
+              console.warn("⚠️ Could not summarize workflow:", summaryRes.status);
+            }
+          } catch (err) {
+            console.error("❌ Summarize workflow failed:", err);
+          }
+        } else {
+          console.log("⚠️ No workflowId/baseUrl/API key — skipping summary.");
         }
-        return response.json();
-      })
-      .then(data => {
+
+        // Now call /ask with question, context, history, and summary
+        const askRes = await fetch("http://localhost:4000/ask", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: request.question,
+            context: request.snapshot,
+            history: request.history,
+            workflowSummary
+          })
+        });
+
+        if (!askRes.ok) {
+          throw new Error(`Network response was not ok: ${askRes.statusText}`);
+        }
+
+        const data = await askRes.json();
         sendResponse(data);
-      })
-      .catch(error => {
+      } catch (error) {
         console.error("Error fetching LLM response:", error);
         sendResponse({ error: "Error: Could not connect to the LLM server." });
-      });
+      }
+    })();
     return true; // keep async channel alive
   }
 
-  // 🐕 Day 7: Fetch workflow via n8n API
+  // 🐕 Day 7: Fetch workflow via n8n API (manual fetch)
   if (request.type === "FETCH_WORKFLOW") {
     (async () => {
       try {
