@@ -10,15 +10,21 @@ async function getApiKey(service) {
 }
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // 🐶 Day 8: LLM processing with workflow summary
+  // 🐶 LLM processing with workflow summary + logs
   if (request.type === "PROCESS_WITH_LLM") {
     (async () => {
       try {
         const apiKey = await getApiKey("n8n");
         let workflowSummary = null;
+        let executionLogs = null;
 
-        // If workflowId & baseUrl are known, summarize first
+        // Load debug toggle state
+        const { debugMode } = await new Promise((resolve) =>
+          chrome.storage.local.get("debugMode", resolve)
+        );
+
         if (request.workflowId && request.baseUrl && apiKey) {
+          // ✅ Fetch workflow summary
           try {
             const summaryRes = await fetch("http://localhost:4000/summarizeWorkflow", {
               method: "POST",
@@ -34,17 +40,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
               const { summary } = await summaryRes.json();
               workflowSummary = summary;
               console.log("✅ Workflow summary fetched and attached.");
-            } else {
-              console.warn("⚠️ Could not summarize workflow:", summaryRes.status);
             }
           } catch (err) {
             console.error("❌ Summarize workflow failed:", err);
           }
-        } else {
-          console.log("⚠️ No workflowId/baseUrl/API key — skipping summary.");
+
+          // 🐾 Fetch logs only if Debug Mode is ON
+          if (debugMode) {
+            try {
+              const logsRes = await fetch("http://localhost:4000/getExecutionLogs", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  workflowId: request.workflowId,
+                  baseUrl: request.baseUrl,
+                  apiKey
+                })
+              });
+
+              if (logsRes.ok) {
+                const { logs } = await logsRes.json();
+                executionLogs = logs;
+                console.log("✅ Execution logs fetched and attached.");
+              } else {
+                console.warn("⚠️ Could not fetch execution logs:", logsRes.status);
+              }
+            } catch (err) {
+              console.error("❌ Execution logs fetch failed:", err);
+            }
+          } else {
+            console.log("⚡ Debug Mode OFF — skipping execution logs.");
+          }
         }
 
-        // Now call /ask with question, context, history, and summary
+        // ✅ Call /ask with everything
         const askRes = await fetch("http://localhost:4000/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -52,13 +81,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             question: request.question,
             context: request.snapshot,
             history: request.history,
-            workflowSummary
+            workflowSummary,
+            executionLogs
           })
         });
-
-        if (!askRes.ok) {
-          throw new Error(`Network response was not ok: ${askRes.statusText}`);
-        }
 
         const data = await askRes.json();
         sendResponse(data);
@@ -67,10 +93,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ error: "Error: Could not connect to the LLM server." });
       }
     })();
-    return true; // keep async channel alive
+    return true;
   }
 
-  // 🐕 Day 7: Fetch workflow via n8n API (manual fetch)
+  // 🐕 Manual workflow fetch for sidepanel test
   if (request.type === "FETCH_WORKFLOW") {
     (async () => {
       try {
@@ -84,7 +110,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
         const res = await fetch(`${baseUrl}/api/v1/workflows/${workflowId}`, {
           headers: {
-            "X-N8N-API-KEY": apiKey // ✅ Correct header for n8n
+            "X-N8N-API-KEY": apiKey
           }
         });
 
@@ -101,6 +127,40 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         sendResponse({ error: err.message });
       }
     })();
-    return true; // keep async channel alive
+    return true;
+  }
+
+  // 🐾 Manual logs fetch for sidepanel test
+  if (request.type === "FETCH_LOGS") {
+    (async () => {
+      try {
+        const { workflowId, baseUrl } = request;
+        const apiKey = await getApiKey("n8n");
+
+        if (!apiKey) {
+          sendResponse({ error: "No API key saved. Please save your n8n API key first." });
+          return;
+        }
+
+        const res = await fetch("http://localhost:4000/getExecutionLogs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ workflowId, baseUrl, apiKey })
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          sendResponse({ error: `Logs request failed: ${res.status} ${text}` });
+          return;
+        }
+
+        const { logs } = await res.json();
+        sendResponse({ logs });
+      } catch (err) {
+        console.error("FETCH_LOGS error:", err);
+        sendResponse({ error: err.message });
+      }
+    })();
+    return true;
   }
 });
