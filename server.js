@@ -15,6 +15,9 @@ const port = process.env.PORT || 4000;
 app.use(cors());
 app.use(bodyParser.json({ limit: "2mb" })); // allow bigger context payloads
 
+// 🐶 Toggle: include DOM snapshot in prompt?
+const USE_DOM_CONTEXT = true;
+
 // Resolve relative path to nodes JSON
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,10 +81,71 @@ async function queryGemini(promptText, history) {
   }
 }
 
+// ✅ Summarize Workflow (Day 8)
+app.post("/summarizeWorkflow", async (req, res) => {
+  try {
+    const { workflowId, baseUrl, apiKey } = req.body;
+
+    if (!workflowId || !baseUrl || !apiKey) {
+      return res
+        .status(400)
+        .json({ error: "workflowId, baseUrl, and apiKey are required" });
+    }
+
+    // Fetch workflow JSON from n8n
+    const response = await fetch(`${baseUrl}/api/v1/workflows/${workflowId}`, {
+      headers: { "X-N8N-API-KEY": apiKey },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return res
+        .status(response.status)
+        .json({ error: `API request failed: ${text}` });
+    }
+
+    const workflow = await response.json();
+
+    // Build a compact summary
+    const nodes =
+      workflow.nodes?.map(
+        (n) => `- name: ${n.name}, type: ${n.type}, id: ${n.id}`
+      ) || [];
+
+    // ✅ safer connections mapping
+    let connections = [];
+    if (workflow.connections) {
+      for (const [src, targetGroups] of Object.entries(workflow.connections)) {
+        if (targetGroups?.main) {
+          for (const group of targetGroups.main) {
+            for (const t of group) {
+              connections.push(`${src} → ${t.node}`);
+            }
+          }
+        }
+      }
+    }
+
+    const summary = `
+Workflow: ${workflow.name} (active: ${workflow.active})
+Nodes:
+${nodes.join("\n")}
+
+Connections:
+${connections.length ? connections.join("\n") : "No connections"}
+    `.trim();
+
+    res.json({ summary, workflow });
+  } catch (error) {
+    console.error("Error summarizing workflow:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ✅ Main /ask endpoint
 app.post("/ask", async (req, res) => {
   try {
-    const { question, context } = req.body;
+    const { question, context, workflowSummary } = req.body;
     const history = req.body.history || [];
 
     if (!question) {
@@ -90,6 +154,7 @@ app.post("/ask", async (req, res) => {
 
     const availableNodes = await getAvailableNodes();
 
+    // Build prompt dynamically
     const prompt = `
 You are Doggy AI Buddy 🐶, an assistant that helps users debug and build n8n workflows.
 
@@ -103,12 +168,19 @@ WORKFLOW BUILDING:
 - Use UI context (buttons, fields) to reference where to click.
 - When suggesting a node, include the full JSON definition from the availableNodes list.
 
+WORKFLOW SUMMARY (from JSON):
+${workflowSummary || "No workflow context provided."}
+
+${
+  USE_DOM_CONTEXT
+    ? `📋 Page context (DOM snapshot):
+${JSON.stringify(context, null, 2)}`
+    : "📋 DOM snapshot: skipped in this mode."
+}
+
 ---
 
 💬 User question: ${question}
-
-📋 Page context (DOM snapshot):
-${JSON.stringify(context, null, 2)}
 
 🧩 Available nodes:
 ${JSON.stringify(availableNodes, null, 2)}
