@@ -22,7 +22,7 @@
       margin-right: 6px;
       cursor: pointer;
     }
-    #result, #logsResult {
+    pre {
       white-space: pre-wrap;
       background: #f1f1f1;
       padding: 10px;
@@ -51,13 +51,29 @@
 
   <!-- Workflow test fetch -->
   <button id="fetch-btn">Fetch Workflow</button>
-  <pre id="result">Click the button above to test the MCP adapter.</pre>
+  <pre id="result">Click the button above to test workflow fetch.</pre>
 
   <hr />
 
   <!-- Debug logs viewer -->
   <button id="fetch-logs-btn">Fetch Execution Logs</button>
-  <pre id="logsResult">Click the button above to fetch the last few execution logs.</pre>
+  <pre id="logsResult">Click the button above to fetch the latest execution logs.</pre>
+
+  <hr />
+
+  <!-- Webhook health check -->
+  <label for="webhookUrl">Webhook URL</label>
+  <input id="webhookUrl" type="text" placeholder="Paste your webhook URL here" />
+  <button id="check-webhook-btn">Check Webhook</button>
+  <pre id="webhookResult">Webhook health check will appear here.</pre>
+
+  <hr />
+
+  <!-- 🔍 Node details fetch -->
+  <label for="nodeName">Node Name</label>
+  <input id="nodeName" type="text" placeholder="Enter node name..." />
+  <button id="get-node-btn">Get Node Details</button>
+  <pre id="nodeResult">Node details will appear here.</pre>
 
   <script type="module" src="sidepanel.js"></script>
 </body>
