@@ -1,7 +1,6 @@
 console.log("Doggy AI Buddy content script loaded");
 
 (async () => {
-  // Dynamically import helper modules
   const { createChatUI, displayMessage } = await import(
     chrome.runtime.getURL("src/chatUI.js")
   );
@@ -12,9 +11,7 @@ console.log("Doggy AI Buddy content script loaded");
     chrome.runtime.getURL("src/dragHandler.js")
   );
 
-  // --- Setup UI ---
   const { mascot, chatBox } = createChatUI();
-
   const chatContainer = chatBox.querySelector("#chatContainer");
   const input = chatBox.querySelector("#userQuestion");
   const askBtn = chatBox.querySelector("#askBtn");
@@ -22,10 +19,8 @@ console.log("Doggy AI Buddy content script loaded");
 
   makeDraggable(chatBox, dragHandle);
 
-  // Conversation state
   const conversationHistory = [];
 
-  // Utility: extract workflowId and baseUrl from current URL
   function getWorkflowContextFromUrl() {
     const url = new URL(window.location.href);
     const parts = url.pathname.split("/");
@@ -34,7 +29,6 @@ console.log("Doggy AI Buddy content script loaded");
     return { workflowId, baseUrl };
   }
 
-  // Helper: fetch workflow summary from backend
   async function fetchWorkflowSummary(workflowId, baseUrl) {
     const apiKey = await new Promise((resolve) => {
       chrome.storage.local.get("n8n", (result) => resolve(result["n8n"]));
@@ -57,7 +51,6 @@ console.log("Doggy AI Buddy content script loaded");
     }
   }
 
-  // Handle "Ask" button
   askBtn.addEventListener("click", async () => {
     const question = input.value;
     if (!question.trim()) return;
@@ -69,6 +62,9 @@ console.log("Doggy AI Buddy content script loaded");
 
     const snapshot = getDOMSnapshot();
     const { workflowId, baseUrl } = getWorkflowContextFromUrl();
+    const apiKey = await new Promise((resolve) => {
+      chrome.storage.local.get("n8n", (result) => resolve(result["n8n"]));
+    });
 
     const workflowSummary = await fetchWorkflowSummary(workflowId, baseUrl);
 
@@ -81,12 +77,13 @@ console.log("Doggy AI Buddy content script loaded");
           history: conversationHistory,
           workflowId,
           baseUrl,
+          apiKey,
           workflowSummary,
         },
         (llmResponse) => {
+          chatContainer.removeChild(chatContainer.lastChild);
           if (chrome.runtime.lastError) {
             console.error("❌ SendMessage failed:", chrome.runtime.lastError.message);
-            chatContainer.removeChild(chatContainer.lastChild);
             displayMessage(
               chatBox,
               "ai",
@@ -95,7 +92,6 @@ console.log("Doggy AI Buddy content script loaded");
             return;
           }
 
-          chatContainer.removeChild(chatContainer.lastChild);
           if (llmResponse?.answer && llmResponse.answer.trim()) {
             conversationHistory.push({
               role: "model",
@@ -103,26 +99,17 @@ console.log("Doggy AI Buddy content script loaded");
             });
             displayMessage(chatBox, "ai", llmResponse.answer);
           } else {
-            displayMessage(
-              chatBox,
-              "ai",
-              llmResponse.error || "Doggy didn’t know what to say 🐾"
-            );
+            displayMessage(chatBox, "ai", llmResponse.error || "Doggy didn’t know what to say 🐾");
           }
         }
       );
     } catch (err) {
       console.error("❌ Exception sending message:", err);
       chatContainer.removeChild(chatContainer.lastChild);
-      displayMessage(
-        chatBox,
-        "ai",
-        "Doggy had a hiccup 🐶 (please reload extension)."
-      );
+      displayMessage(chatBox, "ai", "Doggy had a hiccup 🐶 (please reload extension).");
     }
   });
 
-  // Input listeners for DOM snapshot
   window.addEventListener("load", () => {
     initializeInputListeners(document.querySelectorAll("input, textarea"));
   });
