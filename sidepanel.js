@@ -21,13 +21,9 @@ document.getElementById("saveKey").addEventListener("click", async () => {
 
 // 🐾 Debug Mode toggle
 const debugToggle = document.getElementById("debugToggle");
-
-// Load saved value
 chrome.storage.local.get("debugMode", (data) => {
   debugToggle.checked = data.debugMode || false;
 });
-
-// Save when toggled
 debugToggle.addEventListener("change", () => {
   chrome.storage.local.set({ debugMode: debugToggle.checked });
   console.log("🐾 Debug Mode set to:", debugToggle.checked);
@@ -43,7 +39,6 @@ document.getElementById("fetch-btn").addEventListener("click", () => {
     },
     (response) => {
       const result = document.getElementById("result");
-
       if (chrome.runtime.lastError) {
         result.textContent = "❌ Runtime Error: " + chrome.runtime.lastError.message;
       } else if (response.error) {
@@ -60,12 +55,10 @@ document.getElementById("fetch-btn").addEventListener("click", () => {
 document.getElementById("fetch-logs-btn").addEventListener("click", () => {
   chrome.storage.local.get("debugMode", (data) => {
     const result = document.getElementById("logsResult");
-
     if (!data.debugMode) {
       result.textContent = "⚡ Debug Mode is OFF — logs won’t be fetched.";
       return;
     }
-
     chrome.runtime.sendMessage(
       {
         type: "FETCH_LOGS",
@@ -74,8 +67,7 @@ document.getElementById("fetch-logs-btn").addEventListener("click", () => {
       },
       (response) => {
         if (chrome.runtime.lastError) {
-          result.textContent =
-            "❌ Runtime Error: " + chrome.runtime.lastError.message;
+          result.textContent = "❌ Runtime Error: " + chrome.runtime.lastError.message;
         } else if (response.error) {
           result.textContent = "❌ API Error: " + response.error;
         } else {
@@ -85,4 +77,57 @@ document.getElementById("fetch-logs-btn").addEventListener("click", () => {
       }
     );
   });
+});
+
+// 🐾 Webhook health check
+document.getElementById("check-webhook-btn").addEventListener("click", () => {
+  const url = document.getElementById("webhookUrl").value.trim();
+  const result = document.getElementById("webhookResult");
+
+  if (!url) {
+    result.textContent = "❌ Please enter a webhook URL first!";
+    return;
+  }
+
+  fetch("http://localhost:4000/checkWebhook", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      result.textContent = "Webhook Check Result:\n" + JSON.stringify(data, null, 2);
+    })
+    .catch((err) => {
+      result.textContent = "❌ Webhook check failed: " + err.message;
+    });
+});
+
+// 🔍 Get Node Details
+document.getElementById("get-node-btn").addEventListener("click", () => {
+  const nodeName = document.getElementById("nodeName").value.trim();
+  const result = document.getElementById("nodeResult");
+  if (!nodeName) {
+    result.textContent = "❌ Please enter a node name first!";
+    return;
+  }
+
+  chrome.runtime.sendMessage(
+    {
+      type: "FETCH_NODE_DETAILS",
+      workflowId: "aGxhjg8UlFPqqBKV", // Replace with real ID
+      baseUrl: "https://correct-walrus-happily.ngrok-free.app",
+      nodeName
+    },
+    (response) => {
+      if (chrome.runtime.lastError) {
+        result.textContent = "❌ Runtime Error: " + chrome.runtime.lastError.message;
+      } else if (response.error) {
+        result.textContent = "❌ API Error: " + response.error;
+      } else {
+        result.textContent =
+          "✅ Node Details:\n" + JSON.stringify(response.node, null, 2);
+      }
+    }
+  );
 });
