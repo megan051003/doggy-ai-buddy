@@ -2,18 +2,25 @@ console.log("Doggy AI Buddy content script loaded");
 
 (async () => {
   // Dynamically import helper modules
-  const { createChatUI, displayMessage } = await import(chrome.runtime.getURL("src/chatUI.js"));
-  const { initializeInputListeners, getDOMSnapshot } = await import(chrome.runtime.getURL("src/domWatcher.js"));
-  const { makeDraggable } = await import(chrome.runtime.getURL("src/dragHandler.js"));
+  const { createChatUI, displayMessage } = await import(
+    chrome.runtime.getURL("src/chatUI.js")
+  );
+  const { initializeInputListeners, getDOMSnapshot } = await import(
+    chrome.runtime.getURL("src/domWatcher.js")
+  );
+  const { makeDraggable } = await import(
+    chrome.runtime.getURL("src/dragHandler.js")
+  );
 
   // --- Setup UI ---
-  const container = createChatUI();
-  const chatContainer = container.querySelector("#chatContainer");
-  const input = container.querySelector("#userQuestion");
-  const askBtn = container.querySelector("#askBtn");
-  const dragHandle = container.querySelector("#drag-handle");
+  const { mascot, chatBox } = createChatUI();
 
-  makeDraggable(container, dragHandle);
+  const chatContainer = chatBox.querySelector("#chatContainer");
+  const input = chatBox.querySelector("#userQuestion");
+  const askBtn = chatBox.querySelector("#askBtn");
+  const dragHandle = chatBox.querySelector("#drag-handle");
+
+  makeDraggable(chatBox, dragHandle);
 
   // Conversation state
   const conversationHistory = [];
@@ -21,7 +28,6 @@ console.log("Doggy AI Buddy content script loaded");
   // Utility: extract workflowId and baseUrl from current URL
   function getWorkflowContextFromUrl() {
     const url = new URL(window.location.href);
-    // Example: https://xxxx.ngrok-free.app/workflow/aGxhjg8UlFPqqBKV
     const parts = url.pathname.split("/");
     const workflowId = parts.includes("workflow") ? parts.pop() : null;
     const baseUrl = `${url.protocol}//${url.host}`;
@@ -56,15 +62,14 @@ console.log("Doggy AI Buddy content script loaded");
     const question = input.value;
     if (!question.trim()) return;
 
-    displayMessage(container, "user", question);
+    displayMessage(chatBox, "user", question);
     input.value = "";
     conversationHistory.push({ role: "user", parts: [{ text: question }] });
-    displayMessage(container, "ai", "Thinking...");
+    displayMessage(chatBox, "ai", "Thinking...");
 
     const snapshot = getDOMSnapshot();
     const { workflowId, baseUrl } = getWorkflowContextFromUrl();
 
-    // 🔑 fetch JSON workflow summary
     const workflowSummary = await fetchWorkflowSummary(workflowId, baseUrl);
 
     try {
@@ -76,29 +81,44 @@ console.log("Doggy AI Buddy content script loaded");
           history: conversationHistory,
           workflowId,
           baseUrl,
-          workflowSummary, // ✅ included here
+          workflowSummary,
         },
         (llmResponse) => {
           if (chrome.runtime.lastError) {
             console.error("❌ SendMessage failed:", chrome.runtime.lastError.message);
             chatContainer.removeChild(chatContainer.lastChild);
-            displayMessage(container, "ai", "Doggy got disconnected 🐾 (please reload extension).");
+            displayMessage(
+              chatBox,
+              "ai",
+              "Doggy got disconnected 🐾 (please reload extension)."
+            );
             return;
           }
 
           chatContainer.removeChild(chatContainer.lastChild);
           if (llmResponse?.answer && llmResponse.answer.trim()) {
-            conversationHistory.push({ role: "model", parts: [{ text: llmResponse.answer }] });
-            displayMessage(container, "ai", llmResponse.answer);
+            conversationHistory.push({
+              role: "model",
+              parts: [{ text: llmResponse.answer }],
+            });
+            displayMessage(chatBox, "ai", llmResponse.answer);
           } else {
-            displayMessage(container, "ai", llmResponse.error || "Doggy didn’t know what to say 🐾");
+            displayMessage(
+              chatBox,
+              "ai",
+              llmResponse.error || "Doggy didn’t know what to say 🐾"
+            );
           }
         }
       );
     } catch (err) {
       console.error("❌ Exception sending message:", err);
       chatContainer.removeChild(chatContainer.lastChild);
-      displayMessage(container, "ai", "Doggy had a hiccup 🐶 (please reload extension).");
+      displayMessage(
+        chatBox,
+        "ai",
+        "Doggy had a hiccup 🐶 (please reload extension)."
+      );
     }
   });
 
