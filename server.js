@@ -8,6 +8,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 dotenv.config();
+
 const app = express();
 const port = process.env.PORT || 4000;
 
@@ -20,58 +21,27 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const nodesPath = path.join(__dirname, "active_nodes_summary.json");
 
-// ========== HELPERS ==========
+// 🔒 Sanitize sensitive tokens
+function sanitizeError(msg) {
+  if (!msg) return null;
+  return msg.replace(/(key|token|secret|password)[^\s]*/gi, "[REDACTED]");
+}
 
-// Load available nodes (summary file)
+// 📂 Available nodes file
 async function getAvailableNodes() {
   try {
     const data = await fs.readFile(nodesPath, "utf8");
     return JSON.parse(data);
-  } catch (error) {
-    console.error("Error reading nodes file:", error);
+  } catch {
     return [];
   }
 }
 
-// Format nodes so operations/triggers show both displayName + value
-function formatNodesForPrompt(nodes) {
-  if (!Array.isArray(nodes)) return "None";
-
-  return nodes
-    .map((node) => {
-      let parts = [`Node: ${node.displayName || node.name}`];
-
-      if (node.triggers?.length) {
-        parts.push("  Triggers:");
-        node.triggers.forEach((t) => {
-          parts.push(
-            `   - ${t.displayName || t.action || t.value} (internal: ${t.value})`
-          );
-        });
-      }
-
-      if (node.actions?.length) {
-        parts.push("  Actions:");
-        node.actions.forEach((a) => {
-          parts.push(
-            `   - ${a.displayName || a.action || a.name} (internal: ${a.value})`
-          );
-        });
-      }
-
-      return parts.join("\n");
-    })
-    .join("\n\n");
-}
-
-// Query Gemini
+// 🧠 Gemini API
 async function queryGemini(promptText, history) {
   const url =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
-  const contents = [
-    ...history,
-    { role: "user", parts: [{ text: promptText }] },
-  ];
+  const contents = [...history, { role: "user", parts: [{ text: promptText }] }];
 
   const response = await fetch(url, {
     method: "POST",
@@ -90,71 +60,123 @@ async function queryGemini(promptText, history) {
   return await response.json();
 }
 
-// ========== ROUTES ==========
-
-// 🐶 Main ask route
-app.post("/ask", async (req, res) => {
+// 📊 Workflow summary
+app.post("/summarizeWorkflow", async (req, res) => {
   try {
-    const {
-      question,
-      context,
-      workflowSummary,
-      executionLogs,
-      nodeDetails,
-      builderState,
-    } = req.body;
-    const history = req.body.history || [];
-
-    const availableNodes = await getAvailableNodes();
-    const formattedNodes = formatNodesForPrompt(availableNodes);
-
-    let builderBlock = "";
-    if (builderState?.active && builderState.mode === "one" && builderState.step > 0) {
-      builderBlock = `
-DOGGY BUILDER MODE (STEP-BY-STEP)
-Goal: ${builderState.goal}
-Current Step: ${builderState.step}
-
-Output exactly ONE node for this step:
-- Node name (use the node's displayName, and suggest a friendly name for user to give it in workflow)
-- Why this node
-- Fields (field: value/mapping)
-- Credentials needed (state type AND provide link or where to get them if possible, e.g. official docs, service console, or n8n credentials setup)
-- Quick test tip
-Keep answer under 8 lines.`;
-    } else if (builderState?.active && builderState.mode === "all") {
-      builderBlock = `
-DOGGY BUILDER MODE (ALL STEPS)
-Goal: ${builderState.goal}
-
-Output the FULL workflow as numbered steps, each with:
-- Node name (displayName + suggested friendly workflow name)
-- Why this node
-- Fields (field: value/mapping)
-- Credentials needed (type + help link if possible)
-- Quick test tip
-Be concise, one node per block.`;
+    const { workflowId, baseUrl, apiKey } = req.body;
+    if (!workflowId || !baseUrl || !apiKey) {
+      return res.status(400).json({ error: "workflowId, baseUrl, apiKey required" });
     }
 
-    const nodeInfo = nodeDetails
-      ? `\n📌 Node Details (real JSON):\n${JSON.stringify(nodeDetails, null, 2)}`
-      : "";
+    const response = await fetch(`${baseUrl}/api/v1/workflows/${workflowId}`, {
+      headers: { "X-N8N-API-KEY": apiKey },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(response.status).json({ error: `API failed: ${text}` });
+    }
+
+    const workflow = await response.json();
+    const nodes =
+      workflow.nodes?.map((n) => `- name: ${n.name}, type: ${n.type}, id: ${n.id}`) || [];
+
+    const summary = `
+Workflow: ${workflow.name} (active: ${workflow.active})
+Nodes:
+${nodes.join("\n")}
+    `.trim();
+
+    res.json({ summary, workflow });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🔍 Node details (for sidebar only)
+app.post("/getNodeDetails", async (req, res) => {
+  try {
+    const { workflowId, baseUrl, apiKey, nodeName } = req.body;
+    if (!workflowId || !baseUrl || !apiKey || !nodeName) {
+      return res
+        .status(400)
+        .json({ error: "workflowId, baseUrl, apiKey, nodeName required" });
+    }
+
+    const response = await fetch(`${baseUrl}/api/v1/workflows/${workflowId}`, {
+      headers: { "X-N8N-API-KEY": apiKey },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(response.status).json({ error: `API failed: ${text}` });
+    }
+
+    const workflow = await response.json();
+    const node = workflow.nodes?.find((n) =>
+      n.name.toLowerCase().includes(nodeName.toLowerCase())
+    );
+
+    if (!node) {
+      return res.status(404).json({ error: `Node "${nodeName}" not found` });
+    }
+
+    res.json({ node });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 🎯 Filter only relevant nodes from question
+function filterRelevantNodes(question, nodes) {
+  if (!question || !Array.isArray(nodes)) return [];
+  const q = question.toLowerCase();
+
+  return nodes.filter((node) => {
+    const name = node.displayName?.toLowerCase() || "";
+    const internal = node.name?.toLowerCase() || "";
+    return q.includes(name) || q.includes(internal);
+  });
+}
+
+// 🐶 Main chat endpoint
+app.post("/ask", async (req, res) => {
+  try {
+    const { question, context, workflowSummary, executionLogs } = req.body;
+    const history = req.body.history || [];
+
+    if (!question) return res.status(400).json({ error: "No question provided" });
+
+    const allNodes = await getAvailableNodes();
+    const relevantNodes = filterRelevantNodes(question, allNodes);
+
+    const formattedNodes = relevantNodes
+      .map((n) => {
+        let parts = [`Node: ${n.displayName || n.name}`];
+        if (n.triggers?.length) {
+          parts.push("  Triggers:");
+          n.triggers.forEach((t) =>
+            parts.push(`   - ${t.displayName || t.value} (internal: ${t.value})`)
+          );
+        }
+        if (n.actions?.length) {
+          parts.push("  Actions:");
+          n.actions.forEach((a) =>
+            parts.push(`   - ${a.displayName || a.value} (internal: ${a.value})`)
+          );
+        }
+        return parts.join("\n");
+      })
+      .join("\n\n") || "None";
 
     const prompt = `
 You are Doggy AI Buddy 🐶. Be short, precise, and friendly.
 
 RULES:
-- Always use the node's displayName (user-facing).
-- When listing operations/triggers, always show: Display Name (internal: value).
-- Suggest a clear label the user can give the node in their workflow (like "Sheets Trigger – Row Added").
-- Always explain credentials:
-  * Mention the type (OAuth2, API Key, etc).
-  * Provide a helpful link (official docs, service console, or n8n docs).
-  * If no exact link is known, explain where in n8n they add it.
-- Never invent operations or triggers not in the node JSON.
-- If unsure, say "Open the node in n8n to confirm exact options".
-
-${builderBlock || ""}
+- Only use triggers/actions that exist in the provided JSON.
+- If the user mentions a node, check if it's in the "Available Nodes" list.
+- If missing, say: "Open the node in n8n to confirm options."
+- Never invent operations.
 
 WORKFLOW SUMMARY:
 ${workflowSummary || "No workflow provided."}
@@ -162,9 +184,7 @@ ${workflowSummary || "No workflow provided."}
 EXECUTION LOG:
 ${executionLogs?.[0] ? JSON.stringify(executionLogs[0], null, 2) : "None"}
 
-${nodeInfo}
-
-📚 Available Nodes (with actions/triggers):
+📚 Relevant Available Nodes:
 ${formattedNodes}
 
 ${
@@ -173,7 +193,7 @@ ${
     : "📋 DOM snapshot skipped."
 }
 
-💬 User message: ${question}
+💬 User question: ${question}
 Answer:
     `;
 
@@ -181,17 +201,17 @@ Answer:
     console.log(`🐾 Estimated tokens: ${tokenEstimate}`);
 
     const geminiResponse = await queryGemini(prompt, history);
+
     const answer =
       geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
       "Doggy has no answer 🐾";
 
-    res.json({ answer, tokenEstimate });
+    res.json({ answer, tokenEstimate, relevantNodesCount: relevantNodes.length });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: sanitizeError(error.message) });
   }
 });
 
-// ========== START SERVER ==========
 app.listen(port, () =>
   console.log(`🐶 Doggy AI Buddy backend running at http://localhost:${port}`)
 );
