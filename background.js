@@ -61,7 +61,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         }
 
-        // ✅ Call /ask (no nodeDetails)
+        // ✅ Call /ask with builderState (if set in content.js)
         const askRes = await fetch("http://localhost:4000/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -71,6 +71,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             history: request.history,
             workflowSummary,
             executionLogs,
+            nodeDetails: request.nodeDetails || null,
+            builderState: request.builderState || null, // <-- added builder state passthrough
           }),
         });
 
