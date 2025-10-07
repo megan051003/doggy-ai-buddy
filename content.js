@@ -21,7 +21,7 @@ console.log("Doggy AI Buddy content script loaded");
   makeDraggable(chatBox, dragHandle);
 
   const conversationHistory = [];
-  let builderState = { active: false, mode: null, goal: "", step: 0 }; // Builder state
+  let builderState = { active: false, mode: null, goal: "", step: 0, lastWorkflowId: null };
 
   function getWorkflowContextFromUrl() {
     const url = new URL(window.location.href);
@@ -69,7 +69,15 @@ console.log("Doggy AI Buddy content script loaded");
     }
   }
 
-  async function sendToDoggy(question, snapshot, workflowId, baseUrl, apiKey, workflowSummary, nodeDetails) {
+  async function sendToDoggy(
+    question,
+    snapshot,
+    workflowId,
+    baseUrl,
+    apiKey,
+    workflowSummary,
+    nodeDetails
+  ) {
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
         {
@@ -82,13 +90,20 @@ console.log("Doggy AI Buddy content script loaded");
           apiKey,
           workflowSummary,
           nodeDetails,
-          builderState, // include builder state
+          builderState,
         },
         (llmResponse) => {
           chatContainer.removeChild(chatContainer.lastChild);
           if (chrome.runtime.lastError) {
-            console.error("❌ SendMessage failed:", chrome.runtime.lastError.message);
-            displayMessage(chatBox, "ai", "Doggy got disconnected 🐾 (please reload extension).");
+            console.error(
+              "❌ SendMessage failed:",
+              chrome.runtime.lastError.message
+            );
+            displayMessage(
+              chatBox,
+              "ai",
+              "Doggy got disconnected 🐾 (please reload extension)."
+            );
             return resolve(null);
           }
 
@@ -100,7 +115,11 @@ console.log("Doggy AI Buddy content script loaded");
             displayMessage(chatBox, "ai", llmResponse.answer);
             resolve(llmResponse.answer);
           } else {
-            displayMessage(chatBox, "ai", llmResponse?.error || "Doggy didn’t know what to say 🐾");
+            displayMessage(
+              chatBox,
+              "ai",
+              llmResponse?.error || "Doggy didn’t know what to say 🐾"
+            );
             resolve(null);
           }
         }
@@ -125,6 +144,13 @@ console.log("Doggy AI Buddy content script loaded");
     });
     const workflowSummary = await fetchWorkflowSummary(workflowId, baseUrl);
 
+    // 🐶 Auto-reset builder if workflow changed
+    if (builderState.active && workflowId !== builderState.lastWorkflowId) {
+      builderState = { active: false, mode: null, goal: "", step: 0, lastWorkflowId: workflowId };
+      displayMessage(chatBox, "ai", "🐾 Builder reset (new workflow detected).");
+    }
+    builderState.lastWorkflowId = workflowId;
+
     let nodeDetails = null;
     const nodeMatch = question.match(/(?:^|\s)node\s+(.+)/i);
     if (nodeMatch) {
@@ -132,32 +158,78 @@ console.log("Doggy AI Buddy content script loaded");
       nodeDetails = await fetchNodeDetails(workflowId, baseUrl, apiKey, nodeName);
     }
 
-    // Builder Mode Commands
-    if (question.startsWith("@BuildOne")) {
-      builderState = { active: true, mode: "one", goal: question.replace("@BuildOne", "").trim(), step: 1 };
-      await sendToDoggy(`Builder: step 1`, snapshot, workflowId, baseUrl, apiKey, workflowSummary, nodeDetails);
+    // 🐶 Builder Mode Commands
+    const qLower = question.toLowerCase();
+
+    if (qLower.startsWith("@buildone")) {
+      builderState = {
+        active: true,
+        mode: "one",
+        goal: question.replace(/@buildone/i, "").trim(),
+        step: 1,
+        lastWorkflowId: workflowId,
+      };
+      await sendToDoggy(
+        `Builder: step 1`,
+        snapshot,
+        workflowId,
+        baseUrl,
+        apiKey,
+        workflowSummary,
+        nodeDetails
+      );
       return;
     }
 
-    if (question.startsWith("@BuildAll")) {
-      builderState = { active: true, mode: "all", goal: question.replace("@BuildAll", "").trim(), step: 0 };
-      await sendToDoggy(`Builder: all`, snapshot, workflowId, baseUrl, apiKey, workflowSummary, nodeDetails);
+    if (qLower.startsWith("@buildall")) {
+      builderState = {
+        active: true,
+        mode: "all",
+        goal: question.replace(/@buildall/i, "").trim(),
+        step: 0,
+        lastWorkflowId: workflowId,
+      };
+      await sendToDoggy(
+        `Builder: all`,
+        snapshot,
+        workflowId,
+        baseUrl,
+        apiKey,
+        workflowSummary,
+        nodeDetails
+      );
       return;
     }
 
-    if (builderState.active && builderState.mode === "one" && question.toLowerCase() === "next") {
+    if (builderState.active && builderState.mode === "one" && qLower === "next") {
       builderState.step += 1;
-      await sendToDoggy(`Builder: step ${builderState.step}`, snapshot, workflowId, baseUrl, apiKey, workflowSummary, nodeDetails);
+      await sendToDoggy(
+        `Builder: step ${builderState.step}`,
+        snapshot,
+        workflowId,
+        baseUrl,
+        apiKey,
+        workflowSummary,
+        nodeDetails
+      );
       return;
     }
 
-    if (question.toLowerCase() === "stop") {
-      builderState = { active: false, mode: null, goal: "", step: 0 };
+    if (qLower === "stop") {
+      builderState = { active: false, mode: null, goal: "", step: 0, lastWorkflowId: workflowId };
       displayMessage(chatBox, "ai", "Builder stopped 🐾");
       return;
     }
 
-    await sendToDoggy(question, snapshot, workflowId, baseUrl, apiKey, workflowSummary, nodeDetails);
+    await sendToDoggy(
+      question,
+      snapshot,
+      workflowId,
+      baseUrl,
+      apiKey,
+      workflowSummary,
+      nodeDetails
+    );
   });
 
   window.addEventListener("load", () => {
