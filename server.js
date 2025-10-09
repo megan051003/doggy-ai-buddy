@@ -30,7 +30,9 @@ function sanitizeError(msg) {
 async function getAvailableNodes() {
   try {
     const data = await fs.readFile(nodesPath, "utf8");
-    return JSON.parse(data);
+    const parsed = JSON.parse(data);
+    // Filter hidden or deprecated
+    return parsed.filter((n) => !n.hidden && !n.deprecated);
   } catch {
     return [];
   }
@@ -48,21 +50,19 @@ function logBlock(title, content) {
   console.log(`\n==== ${title} ====\n${content}\n=============================\n`);
 }
 
-// --- heuristic for obvious services
 function heuristicPickNodes(question, allNodes) {
   const picks = new Set();
-  const wantTwitter = /\b(?:twitter|x\b|tweets?|timeline|retweet|tweet\.com)\b/i.test(question);
-  const wantSlack = /\bslack\b/i.test(question);
-  const wantTelegram = /\btelegram\b/i.test(question);
-  const wantHttp = /\bhttp request|api call|rest|endpoint\b/i.test(question);
-
-  allNodes.forEach((n) => {
-    const dn = normalize(n.displayName || n.name);
-    if (wantTwitter && dn.includes("twitter")) picks.add(dn);
-    if (wantSlack && dn.includes("slack")) picks.add(dn);
-    if (wantTelegram && dn.includes("telegram")) picks.add(dn);
-    if (wantHttp && dn.includes("http request")) picks.add(dn);
-  });
+  const q = normalize(question);
+  if (/twitter|x\b|tweet/.test(q))
+    allNodes.forEach((n) => n.displayName?.toLowerCase().includes("twitter") && picks.add(n.displayName));
+  if (/slack/.test(q))
+    allNodes.forEach((n) => n.displayName?.toLowerCase().includes("slack") && picks.add(n.displayName));
+  if (/telegram/.test(q))
+    allNodes.forEach((n) => n.displayName?.toLowerCase().includes("telegram") && picks.add(n.displayName));
+  if (/http request|api call|rest|endpoint/.test(q))
+    allNodes.forEach((n) => n.displayName?.toLowerCase().includes("http request") && picks.add(n.displayName));
+  if (/reddit/.test(q))
+    allNodes.forEach((n) => n.displayName?.toLowerCase().includes("reddit") && picks.add(n.displayName));
   return Array.from(picks);
 }
 
@@ -100,25 +100,23 @@ function extractChosenNodeAndOperation(answer) {
 function collectAllowedOps(selectedNodes) {
   const ops = new Set();
   for (const n of selectedNodes) {
-    if (Array.isArray(n.actions)) {
+    if (Array.isArray(n.actions))
       for (const a of n.actions) {
         if (a.displayName) ops.add(normalize(a.displayName));
         if (a.value) ops.add(normalize(a.value));
       }
-    }
-    if (Array.isArray(n.triggers)) {
+    if (Array.isArray(n.triggers))
       for (const t of n.triggers) {
         if (t.displayName) ops.add(normalize(t.displayName));
         if (t.value) ops.add(normalize(t.value));
       }
-    }
   }
   return ops;
 }
 
-// 🧠 combine DOM + JSON context
-function getReasoningContext(context, selectedNodes) {
-  const domText = context ? JSON.stringify(context).slice(0, 15000) : "";
+function getReasoningContext(context, selectedNodes, includeDom = true) {
+  const domText =
+    includeDom && context ? JSON.stringify(context).slice(0, 15000) : "";
   const jsonText = selectedNodes?.length
     ? JSON.stringify(selectedNodes, null, 2).slice(0, 10000)
     : "";
@@ -126,24 +124,19 @@ function getReasoningContext(context, selectedNodes) {
   const combined = `
 🐶 Reasoning Context for Gemini
 --------------------------------
-1️⃣ DOM snapshot (truncated to 15KB):
-${domText || "No DOM context provided."}
-
-2️⃣ Node JSON metadata (truncated to 10KB):
-${jsonText || "No node JSON metadata provided."}
+${includeDom ? `1️⃣ DOM snapshot (truncated):\n${domText || "No DOM"}\n\n` : ""}
+2️⃣ Node JSON metadata (truncated):
+${jsonText || "No node JSON data"}
 
 Rules for reasoning:
-- Only use parameters, fields, or options visible in DOM or JSON.
-- Never invent new ones.
-- If a field like "oldest" is requested but doesn’t exist, use the closest valid alternative.
-- Don’t ask the user to check manually; reason directly using these facts.
+- Use parameters and actions visible in JSON only.
+- Never invent or assume extra fields.
 --------------------------------
 `;
   logBlock("👁️ Context Sent to Gemini", combined);
   return combined;
 }
 
-// ================== LLM HELPER ==================
 async function queryGemini(model, promptText, history) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const contents = [...(history || []), { role: "user", parts: [{ text: promptText }] }];
@@ -183,7 +176,7 @@ app.post("/ask", async (req, res) => {
     const { question, context, workflowSummary, builderState: clientBuilder } = req.body;
     if (!question) return res.status(400).json({ error: "No question provided" });
 
-    // 🧠 Infer builder mode
+    // Infer builder mode
     let builder = clientBuilder && clientBuilder.active
       ? clientBuilder
       : (() => {
@@ -198,27 +191,24 @@ app.post("/ask", async (req, res) => {
     const allNodes = await getAvailableNodes();
     const nodeNames = getNodeNames(allNodes);
 
-    // =================== BUILDER MODE ===================
+    // ========== BUILDER MODE ==========
     if (builder.active) {
       logBlock("🐶 Builder Mode", JSON.stringify(builder, null, 2));
 
-      // --- Phase A: Node Name Selection ---
       const pickPrompt = `
 You are Doggy AI Buddy 🐶.
 User goal: ${builder.goal || question}
 
-Here is the list of available node NAMES:
+List of AVAILABLE node names:
 ${nodeNames.join(", ")}
 
-Pick the most relevant 1–3 node names from the list.
-If user asked to build ALL, respond "ALL".
-If none match, respond "HTTP Request" if available, otherwise "None".
-Return only comma-separated names.
+Pick only relevant nodes from this list.
+Never include nodes not in JSON.
+Return comma-separated names or "ALL".
 `.trim();
 
       const pickResponse = await queryGemini("gemini-2.5-flash", pickPrompt, []);
       const pickedText = pickResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "None";
-
       let geminiPickedNames =
         pickedText === "ALL" ? nodeNames : pickedText.split(",").map((s) => s.trim());
       const heuristicPicks = heuristicPickNodes(builder.goal || question, allNodes);
@@ -243,28 +233,26 @@ Return only comma-separated names.
         )
       );
 
-      // --- Phase B: Allowed Operations ---
       const allowedOps = formatAllowedOps(selectedNodes);
       logBlock("Phase B - Allowed Operations", allowedOps);
       const allowedOpsSet = collectAllowedOps(selectedNodes);
 
-      // 🧩 Field summary
-      const fieldSummary = selectedNodes.map((n) => ({
-        name: n.displayName,
-        fields:
-          n.properties?.map((f) => ({
-            name: f.displayName,
-            type: f.type,
-            desc: f.description,
-          })) || [],
-      }));
+      const validationContext = `
+Validation Rules (from JSON)
+--------------------------------------------
+Available node types: ${allNodes.length}
+Hidden/internal nodes excluded.
+If a node or action isn't in JSON, reject it.
+--------------------------------------------
+`;
 
-      const reasoningContext = getReasoningContext(context, selectedNodes);
+      // ❌ disable DOM here
+      const reasoningContext = getReasoningContext(context, selectedNodes, false);
 
-      // 🧠 Improved builder prompt (detailed per-node instructions)
-      const builderPrompt =
-        builder.mode === "one"
-          ? `
+      // 🧠 Differentiate modes
+      let builderPrompt;
+      if (builder.mode === "one") {
+        builderPrompt = `
 You are Doggy AI Buddy 🐶.
 Builder step-by-step mode is active.
 
@@ -272,70 +260,66 @@ User goal: ${builder.goal || question}
 Current Step: ${builder.step}
 
 ${reasoningContext}
+${validationContext}
 
 Allowed operations:
 ${allowedOps}
 
-Field summary for these nodes:
-${JSON.stringify(fieldSummary, null, 2)}
+Rules:
+- Use only JSON fields.
+- Never invent new ones.
 
-Now:
-- Pick ONE node for this step.
-- Describe it fully using visible fields and actions.
-- Never say "add X node" generically — show exact setup.
-
-Return in this format:
+Return:
 1. 🏷️ Friendly node name:
 2. 🔧 Node type:
-3. 🎯 Action/Operation: (must match from above)
+3. 🎯 Action/Operation:
 4. 📝 Fields to fill:
    - <field>: <value or {{mapping}}>
-5. ⚙️ Available options (from JSON):
-   - <option>: <values or description>
-6. 🔑 Credentials needed:
-   - Type: <OAuth2 / API Key / Bearer ...>
-   - Docs: <link>
+5. ⚙️ Available options:
+   - <option>: <values>
+6. 🔑 Credentials:
+   - Type:
+   - Docs:
 7. 🧪 Quick test tip:
-`.trim()
-          : `
+`;
+      } else if (builder.mode === "all") {
+        builderPrompt = `
 You are Doggy AI Buddy 🐶.
 Builder ALL-STEPS mode is active.
 
 User goal: ${builder.goal || question}
 
 ${reasoningContext}
+${validationContext}
 
 Allowed operations:
 ${allowedOps}
 
-Field summary for these nodes:
-${JSON.stringify(fieldSummary, null, 2)}
+Rules:
+- Build the ENTIRE workflow from start to finish.
+- Use ONLY nodes visible in JSON.
+- Each node must logically connect to the next.
+- Include configuration, mappings, credentials, and test tips.
 
-Your job:
-- Plan EVERY node needed to achieve the goal.
-- Use real actions and fields from JSON only.
-- Include configuration details and mappings.
-- Never invent missing fields — choose closest valid alternative.
-
-Return in this format for each node:
+Return in this format for EACH node:
+----------------------------------
 - 🏷️ Friendly node name:
 - 🔧 Node type:
 - 🎯 Action/Operation:
 - 📝 Fields to fill:
    - <field>: <value or {{mapping}}>
-- ⚙️ Available options (from JSON):
-   - <option>: <values or description>
+- ⚙️ Available options:
+   - <option>: <values>
 - 🔑 Credentials:
    - Type:
    - Docs:
 - 🧪 Quick test tip:
-`.trim();
+----------------------------------
+`;
+      }
 
       const geminiResponse = await queryGemini("gemini-2.5-flash", builderPrompt, []);
       let answer = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-
-      if (!answer || answer.length < 5)
-        answer = "Woof! I checked your DOM and JSON — couldn’t find a direct match 🐾";
 
       const { nodeLine, opLine } = extractChosenNodeAndOperation(answer);
       console.log("🤖 Gemini chose node:", nodeLine);
@@ -355,8 +339,8 @@ Return in this format for each node:
       });
     }
 
-    // =================== NORMAL CHAT ===================
-    const reasoningContext = getReasoningContext(context, []);
+    // ========== NORMAL CHAT ==========
+    const reasoningContext = getReasoningContext(context, [], USE_DOM_CONTEXT);
     const prompt = `
 You are Doggy AI Buddy 🐶.
 User: ${question}
@@ -366,15 +350,14 @@ ${workflowSummary || "None"}
 
 ${reasoningContext}
 
-Answer concisely, grounded ONLY on DOM and JSON above.
-Never say you don't know; always reason based on visible or known data.
+Answer concisely, grounded ONLY on visible JSON (and DOM if available).
 `.trim();
 
     const geminiResponse = await queryGemini("gemini-2.5-flash", prompt, []);
     let answer = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
     if (!answer || answer.length < 5)
       answer =
-        "Woof! Based on the visible DOM, I can’t find that exactly — but I’ll guide you step-by-step using what’s on screen 🐾";
+        "Woof! Based on the visible data, I can’t find that exactly — but I’ll guide you step-by-step using what’s visible 🐾";
 
     res.json({ answer, mode: "normal" });
   } catch (err) {
