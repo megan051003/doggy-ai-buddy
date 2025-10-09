@@ -1,4 +1,13 @@
 export function createChatUI() {
+  // 🧠 Create or restore per-tab session
+  let sessionId = localStorage.getItem("doggieSessionId");
+  if (!sessionId) {
+    sessionId = "sess_" + Math.random().toString(36).substring(2, 10);
+    localStorage.setItem("doggieSessionId", sessionId);
+  }
+
+  let workflowName = localStorage.getItem("doggieWorkflowName") || "New Workflow";
+
   // 🐶 Mascot button
   const mascot = document.createElement("img");
   mascot.id = "doggy-ai-mascot";
@@ -34,6 +43,7 @@ export function createChatUI() {
     box-sizing: border-box;
     resize: both;
     overflow: auto;
+    cursor: move; /* shows draggable cursor */
   `;
 
   chatBox.innerHTML = `
@@ -81,6 +91,7 @@ export function createChatUI() {
         border-radius: 20px;
         background-color: #222;
         color: #fff;
+        cursor: text; /* allow typing */
       }
       #doggy-chat-box button {
         margin-left: 5px;
@@ -91,8 +102,27 @@ export function createChatUI() {
         border-radius: 20px;
         cursor: pointer;
       }
+      #doggy-header {
+        font-weight: bold;
+        margin-bottom: 6px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      #newTabBtn {
+        background: #444;
+        border-radius: 8px;
+        font-size: 12px;
+        padding: 4px 8px;
+        margin-left: 8px;
+      }
     </style>
-    <div id="drag-handle">🐶 Doggy AI Buddy</div>
+
+    <div id="doggy-header">
+      <div>🐶 Working on: <span id="workflowName">${workflowName}</span></div>
+      <button id="newTabBtn">New Workflow Tab 🧩</button>
+    </div>
+
     <div class="chat-container-wrapper">
       <div id="chatContainer" class="chat-container"></div>
     </div>
@@ -102,7 +132,7 @@ export function createChatUI() {
     </div>
   `;
 
-  // Toggle chat on mascot click
+  // 🐾 Toggle chat
   mascot.addEventListener("click", () => {
     chatBox.style.display = chatBox.style.display === "none" ? "flex" : "none";
   });
@@ -110,10 +140,95 @@ export function createChatUI() {
   document.body.appendChild(mascot);
   document.body.appendChild(chatBox);
 
-  // ✅ Return both
+  // 🧲 Make entire chat box draggable
+  makeDraggable(chatBox);
+
+  // === Chat logic ===
+  const askBtn = chatBox.querySelector("#askBtn");
+  const input = chatBox.querySelector("#userQuestion");
+  const chatContainer = chatBox.querySelector("#chatContainer");
+  const newTabBtn = chatBox.querySelector("#newTabBtn");
+  const workflowSpan = chatBox.querySelector("#workflowName");
+
+  askBtn.addEventListener("click", async () => {
+    const question = input.value.trim();
+    if (!question) return;
+
+    displayMessage(chatBox, "user", question);
+    input.value = "";
+
+    if (question.startsWith("@build") && !workflowName.includes("→")) {
+      workflowName = question.replace("@build", "").trim().slice(0, 40);
+      workflowSpan.textContent = workflowName;
+      localStorage.setItem("doggieWorkflowName", workflowName);
+    }
+
+    try {
+      const res = await fetch("http://localhost:4000/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          sessionId,
+          builderState: { active: question.startsWith("@build") },
+        }),
+      });
+
+      const data = await res.json();
+      displayMessage(chatBox, "ai", data.answer || "🐾 No answer received.");
+    } catch (err) {
+      displayMessage(chatBox, "ai", "❌ Error: " + err.message);
+    }
+  });
+
+  newTabBtn.addEventListener("click", () => {
+    localStorage.removeItem("doggieWorkflowName");
+    const newSession = "sess_" + Math.random().toString(36).substring(2, 10);
+    localStorage.setItem("doggieSessionId", newSession);
+    window.location.reload();
+  });
+
   return { mascot, chatBox };
 }
 
+// 🧲 Utility for draggable chat box
+function makeDraggable(el) {
+  let isDragging = false;
+  let startX, startY, startLeft, startTop;
+
+  el.addEventListener("mousedown", (e) => {
+    // Skip dragging inside input or button
+    if (e.target.tagName === "INPUT" || e.target.tagName === "BUTTON" || e.target.tagName === "TEXTAREA") return;
+
+    isDragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    const rect = el.getBoundingClientRect();
+    startLeft = rect.left;
+    startTop = rect.top;
+    el.style.transition = "none";
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!isDragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    el.style.left = `${startLeft + dx}px`;
+    el.style.top = `${startTop + dy}px`;
+    el.style.bottom = "auto";
+    el.style.right = "auto";
+    el.style.position = "fixed";
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (isDragging) {
+      isDragging = false;
+      el.style.transition = "all 0.2s ease";
+    }
+  });
+}
+
+// 💬 Append message to chat
 export function displayMessage(chatBox, sender, text) {
   const chatContainer = chatBox.querySelector("#chatContainer");
   const messageDiv = document.createElement("div");
