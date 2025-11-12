@@ -1,3 +1,8 @@
+/*******************************************************************************
+ * Doggy AI Buddy 🐶 Backend Server
+ * Clean Visual Output + No DOM + No Hardcoding
+ *******************************************************************************/
+
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
@@ -9,19 +14,30 @@ import { fileURLToPath } from "url";
 
 dotenv.config();
 
+// ===============================================================
+// 🧠 App Setup
+// ===============================================================
 const app = express();
 const port = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(bodyParser.json({ limit: "3mb" }));
 
-// ================== GLOBAL CONFIG ==================
-const USE_DOM_CONTEXT = true;
+// ===============================================================
+// 🌍 Global Config
+// ===============================================================
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const nodesPath = path.join(__dirname, "active_nodes_summary.json");
 
-// ================== HELPERS ==================
+// ===============================================================
+// 🧠 NEW: Builder Sessions Memory
+// ===============================================================
+const builderSessions = {}; // { userId: { mode, goal, step, nodes: [] } }
+
+// ===============================================================
+// ⚙️ Helper Functions
+// ===============================================================
 function sanitizeError(msg) {
   if (!msg) return null;
   return msg.replace(/(key|token|secret|password)[^\s]*/gi, "[REDACTED]");
@@ -46,24 +62,6 @@ function normalize(s) {
 
 function logBlock(title, content) {
   console.log(`\n==== ${title} ====\n${content}\n=============================\n`);
-}
-
-// --- heuristic for obvious services
-function heuristicPickNodes(question, allNodes) {
-  const picks = new Set();
-  const wantTwitter = /\b(?:twitter|x\b|tweets?|timeline|retweet|tweet\.com)\b/i.test(question);
-  const wantSlack = /\bslack\b/i.test(question);
-  const wantTelegram = /\btelegram\b/i.test(question);
-  const wantHttp = /\bhttp request|api call|rest|endpoint\b/i.test(question);
-
-  allNodes.forEach((n) => {
-    const dn = normalize(n.displayName || n.name);
-    if (wantTwitter && dn.includes("twitter")) picks.add(dn);
-    if (wantSlack && dn.includes("slack")) picks.add(dn);
-    if (wantTelegram && dn.includes("telegram")) picks.add(dn);
-    if (wantHttp && dn.includes("http request")) picks.add(dn);
-  });
-  return Array.from(picks);
 }
 
 function formatAllowedOps(nodes) {
@@ -116,34 +114,9 @@ function collectAllowedOps(selectedNodes) {
   return ops;
 }
 
-// 🧠 combine DOM + JSON context
-function getReasoningContext(context, selectedNodes) {
-  const domText = context ? JSON.stringify(context).slice(0, 15000) : "";
-  const jsonText = selectedNodes?.length
-    ? JSON.stringify(selectedNodes, null, 2).slice(0, 10000)
-    : "";
-
-  const combined = `
-🐶 Reasoning Context for Gemini
---------------------------------
-1️⃣ DOM snapshot (truncated to 15KB):
-${domText || "No DOM context provided."}
-
-2️⃣ Node JSON metadata (truncated to 10KB):
-${jsonText || "No node JSON metadata provided."}
-
-Rules for reasoning:
-- Only use parameters, fields, or options visible in DOM or JSON.
-- Never invent new ones.
-- If a field like "oldest" is requested but doesn’t exist, use the closest valid alternative.
-- Don’t ask the user to check manually; reason directly using these facts.
---------------------------------
-`;
-  logBlock("👁️ Context Sent to Gemini", combined);
-  return combined;
-}
-
-// ================== LLM HELPER ==================
+// ===============================================================
+// 🧠 Gemini Helper
+// ===============================================================
 async function queryGemini(model, promptText, history) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
   const contents = [...(history || []), { role: "user", parts: [{ text: promptText }] }];
@@ -177,32 +150,147 @@ async function queryGemini(model, promptText, history) {
   }
 }
 
-// ================== MAIN BRAIN ==================
+// ===============================================================
+// 🐾 MAIN ROUTE: /ask
+// ===============================================================
 app.post("/ask", async (req, res) => {
   try {
-    const { question, context, workflowSummary, builderState: clientBuilder } = req.body;
+    const { question, workflowSummary, builderState: clientBuilder } = req.body;
     if (!question) return res.status(400).json({ error: "No question provided" });
 
-    // 🧠 Infer builder mode
-    let builder = clientBuilder && clientBuilder.active
-      ? clientBuilder
-      : (() => {
-          const q = (question || "").trim();
-          const m = q.match(/^@\s*build\s*(one|all)\b/i);
-          if (!m) return { active: false };
-          const mode = m[1].toLowerCase() === "one" ? "one" : "all";
-          const goal = q.replace(/^@\s*build\s*(one|all)\b/i, "").trim();
-          return { active: true, mode, goal, step: mode === "one" ? 1 : 0 };
-        })();
+    // 🔍 Determine Builder Mode
+    let builder =
+      clientBuilder && clientBuilder.active
+        ? clientBuilder
+        : (() => {
+            const q = (question || "").trim();
+            const m = q.match(/^@\s*build\s*(one|all)\b/i);
+            if (!m) return { active: false };
+            const mode = m[1].toLowerCase() === "one" ? "one" : "all";
+            const goal = q.replace(/^@\s*build\s*(one|all)\b/i, "").trim();
+            return { active: true, mode, goal, step: mode === "one" ? 1 : 0 };
+          })();
 
     const allNodes = await getAvailableNodes();
     const nodeNames = getNodeNames(allNodes);
 
-    // =================== BUILDER MODE ===================
+    // ===========================================================
+    // 🧩 BUILDER MODE
+    // ===========================================================
     if (builder.active) {
       logBlock("🐶 Builder Mode", JSON.stringify(builder, null, 2));
 
-      // --- Phase A: Node Name Selection ---
+      // ===========================================================
+      // 🧠 Detect Intent (Continue / Change Logic / New Topic)
+      // ===========================================================
+      const intentPrompt = `
+You are Doggy AI Buddy 🐶.
+Given the user's latest message and current workflow goal, classify the intent.
+
+User's message:
+"${question}"
+
+Current goal:
+"${builder.goal}"
+
+Possible intents:
+1️⃣ CONTINUE — the user wants to continue building the next step.
+2️⃣ CHANGE_LOGIC — the user is modifying or refining part of the workflow logic (may affect previous or future steps).
+3️⃣ NEW_TOPIC — the user has started an unrelated query (exit builder mode).
+
+Return only one of these exact words: CONTINUE, CHANGE_LOGIC, or NEW_TOPIC.
+`.trim();
+
+      let userIntent = "CONTINUE";
+      try {
+        const intentResponse = await queryGemini("gemini-2.5-flash", intentPrompt, []);
+        const rawIntent =
+          intentResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim()?.toUpperCase() || "";
+        if (["CONTINUE", "CHANGE_LOGIC", "NEW_TOPIC"].includes(rawIntent)) {
+          userIntent = rawIntent;
+        }
+      } catch (err) {
+        console.warn("⚠️ Intent detection failed:", err.message);
+      }
+
+      if (userIntent === "NEW_TOPIC") {
+        builder = { active: false };
+        return res.json({
+          answer: "🐾 Looks like we switched topics — builder mode ended.",
+          builderState: builder,
+        });
+      }
+
+      // ===========================================================
+      // 🔁 Logic Change Detected — Auto Revision
+      // ===========================================================
+      if (userIntent === "CHANGE_LOGIC") {
+        console.log("🔁 LLM detected workflow logic change — revising sequence dynamically...");
+        builder.goal = `${builder.goal} (updated by user: ${question})`;
+        builder.reviseLast = true;
+
+        const revisionPrompt = `
+You are Doggy AI Buddy 🐶.
+The user changed their workflow logic.
+
+Current node sequence: ${builder.geminiPickedNames?.join(" → ") || "None"}
+New message: "${question}"
+
+Decide which steps should be revised, replaced, or kept as-is.
+Return a JSON object like:
+{
+  "revise": [indices of steps to regenerate],
+  "keep": [indices of steps to keep]
+}
+`.trim();
+
+        try {
+          const revRes = await queryGemini("gemini-2.5-flash", revisionPrompt, []);
+          let text = revRes?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "{}";
+
+          text = text
+            .replace(/```json/gi, "")
+            .replace(/```/g, "")
+            .replace(/^[^{]*({[\s\S]*})[^}]*$/m, "$1")
+            .trim();
+
+          builder.revisionPlan = JSON.parse(text);
+          console.log("🔧 Revision plan:", builder.revisionPlan);
+        } catch (err) {
+          console.warn("⚠️ Could not get revision plan:", err.message);
+          builder.revisionPlan = null;
+        }
+
+        // 🐾 Auto-apply first revision immediately
+        if (builder.revisionPlan?.revise?.length) {
+          const nextReviseIndex = builder.revisionPlan.revise[0];
+          builder.currentNodeIndex = nextReviseIndex;
+          builder.reviseNow = true;
+          return res.json({
+            answer: `🐾 Got it! Updating your workflow logic — revising Step ${nextReviseIndex + 1} now 🧠`,
+            builderState: builder,
+            autoContinue: true,
+          });
+        }
+
+        return res.json({
+          answer: "🐾 Got it! Updating your workflow logic as per your change — revising relevant steps 🧠",
+          builderState: builder,
+        });
+      }
+
+      // ===========================================================
+      // 🧭 Continue Normal Step Flow
+      // ===========================================================
+      const isNext = /\b(next|what.?next|continue|go on|proceed)\b/i.test(question);
+      if (builder.mode === "one" && builder.geminiPickedNames && isNext) {
+        builder.currentNodeIndex = (builder.currentNodeIndex || 0) + 1;
+        if (builder.currentNodeIndex >= builder.geminiPickedNames.length) {
+          return res.json({ answer: "🎉 Workflow logic complete! Nothing left to build 🐾" });
+        }
+      }
+
+      // --- Node selection / allowed ops / prompt building ---
       const pickPrompt = `
 You are Doggy AI Buddy 🐶.
 User goal: ${builder.goal || question}
@@ -212,56 +300,41 @@ ${nodeNames.join(", ")}
 
 Pick the most relevant 1–3 node names from the list.
 If user asked to build ALL, respond "ALL".
-If none match, respond "HTTP Request" if available, otherwise "None".
+If none match, respond "None".
 Return only comma-separated names.
 `.trim();
 
-      const pickResponse = await queryGemini("gemini-2.5-flash", pickPrompt, []);
-      const pickedText = pickResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "None";
+      if (!builder.geminiPickedNames) {
+        const pickResponse = await queryGemini("gemini-2.5-flash", pickPrompt, []);
+        const pickedText =
+          pickResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "None";
+        const geminiPickedNames = pickedText.split(",").map((s) => s.trim()).filter(Boolean);
+        builder.geminiPickedNames = geminiPickedNames;
+        builder.currentNodeIndex = 0;
+      }
 
-      let geminiPickedNames =
-        pickedText === "ALL" ? nodeNames : pickedText.split(",").map((s) => s.trim());
-      const heuristicPicks = heuristicPickNodes(builder.goal || question, allNodes);
-
-      const selectedNamesSet = new Set([...geminiPickedNames, ...heuristicPicks].map(normalize));
-      let selectedNodes = allNodes.filter((n) =>
-        selectedNamesSet.has(normalize(n.displayName || n.name))
+      const currentNodeName = builder.geminiPickedNames[builder.currentNodeIndex];
+      let selectedNodes = allNodes.filter(
+        (n) => normalize(n.displayName || n.name) === normalize(currentNodeName)
       );
-      if (builder.mode === "one" && selectedNodes.length > 1)
-        selectedNodes = [selectedNodes[0]];
+      if (!selectedNodes.length && builder.geminiPickedNames.length) {
+        selectedNodes = allNodes.filter((n) =>
+          normalize(n.displayName || n.name).includes(normalize(currentNodeName))
+        );
+      }
 
-      logBlock(
-        "Phase A - Node Selection",
-        JSON.stringify(
-          {
-            geminiPickedNames,
-            heuristicPicks,
-            finalSelectedNodes: selectedNodes.map((n) => n.displayName),
-          },
-          null,
-          2
-        )
-      );
-
-      // --- Phase B: Allowed Operations ---
       const allowedOps = formatAllowedOps(selectedNodes);
-      logBlock("Phase B - Allowed Operations", allowedOps);
       const allowedOpsSet = collectAllowedOps(selectedNodes);
-
-      // 🧩 Field summary
       const fieldSummary = selectedNodes.map((n) => ({
         name: n.displayName,
-        fields:
-          n.properties?.map((f) => ({
-            name: f.displayName,
-            type: f.type,
-            desc: f.description,
-          })) || [],
+        fields: (n.fields || n.properties || []).map((f) => ({
+          name: f.displayName,
+          type: f.type,
+          desc: f.description,
+          default: f.default || null,
+        })),
       }));
 
-      const reasoningContext = getReasoningContext(context, selectedNodes);
-
-      // 🧠 Improved builder prompt (detailed per-node instructions)
       const builderPrompt =
         builder.mode === "one"
           ? `
@@ -269,9 +342,8 @@ You are Doggy AI Buddy 🐶.
 Builder step-by-step mode is active.
 
 User goal: ${builder.goal || question}
-Current Step: ${builder.step}
-
-${reasoningContext}
+Current Step: ${builder.currentNodeIndex + 1}
+Current Node: ${currentNodeName}
 
 Allowed operations:
 ${allowedOps}
@@ -279,23 +351,41 @@ ${allowedOps}
 Field summary for these nodes:
 ${JSON.stringify(fieldSummary, null, 2)}
 
-Now:
-- Pick ONE node for this step.
-- Describe it fully using visible fields and actions.
-- Never say "add X node" generically — show exact setup.
+Important: Always follow the sequence of Gemini’s selected nodes (${builder.geminiPickedNames.join(
+          " → "
+        )})
+Do not restart or reorder nodes. Only build the current one.
 
-Return in this format:
-1. 🏷️ Friendly node name:
-2. 🔧 Node type:
-3. 🎯 Action/Operation: (must match from above)
-4. 📝 Fields to fill:
-   - <field>: <value or {{mapping}}>
-5. ⚙️ Available options (from JSON):
-   - <option>: <values or description>
-6. 🔑 Credentials needed:
-   - Type: <OAuth2 / API Key / Bearer ...>
-   - Docs: <link>
-7. 🧪 Quick test tip:
+Now generate your response EXACTLY in this format:
+
+Here's your workflow plan 🐶:
+
+───────────────────────────────
+🐾 Step ${builder.currentNodeIndex + 1}: <Friendly Node Name>
+
+🏷️ Node Name:
+<Exact node name>
+
+🔧 Node Type:
+<Node type from available list>
+
+🎯 Action/Operation:
+<Exact operation or trigger name>
+
+📝 Fields to Fill:
+- <field> → <value or {{mapping}}>
+
+⚙️ Options:
+- <option> → <description or value>
+
+🔑 Credentials:
+- Type: <OAuth2 / API key / webhook>
+- Docs: <valid URL>
+
+🧪 Test Tip:
+<Simple test instruction>
+
+───────────────────────────────
 `.trim()
           : `
 You are Doggy AI Buddy 🐶.
@@ -303,47 +393,34 @@ Builder ALL-STEPS mode is active.
 
 User goal: ${builder.goal || question}
 
-${reasoningContext}
-
 Allowed operations:
 ${allowedOps}
 
 Field summary for these nodes:
 ${JSON.stringify(fieldSummary, null, 2)}
 
-Your job:
-- Plan EVERY node needed to achieve the goal.
-- Use real actions and fields from JSON only.
-- Include configuration details and mappings.
-- Never invent missing fields — choose closest valid alternative.
+Follow Gemini’s selected node sequence: ${builder.geminiPickedNames.join(" → ")}.
 
-Return in this format for each node:
-- 🏷️ Friendly node name:
-- 🔧 Node type:
-- 🎯 Action/Operation:
-- 📝 Fields to fill:
-   - <field>: <value or {{mapping}}>
-- ⚙️ Available options (from JSON):
-   - <option>: <values or description>
-- 🔑 Credentials:
-   - Type:
-   - Docs:
-- 🧪 Quick test tip:
+Generate your response EXACTLY in this friendly visual format — just like the step-by-step mode, but include *all steps* in one message.
+
+Here's your workflow plan 🐶:
+
+───────────────────────────────
+🐾 Step {n}: <Friendly Node Name>
+🏷️ Node Name:
+<Exact node name>
+...
+───────────────────────────────
 `.trim();
 
       const geminiResponse = await queryGemini("gemini-2.5-flash", builderPrompt, []);
       let answer = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
-
-      if (!answer || answer.length < 5)
-        answer = "Woof! I checked your DOM and JSON — couldn’t find a direct match 🐾";
+      answer = answer.replace(/\*\*/g, "").replace(/\r/g, "").replace(/\n{3,}/g, "\n\n").replace(/─{10,}/g, "───────────────────────────────");
+      if (!answer || answer.length < 5) answer = "Woof! I couldn’t find a direct match 🐾";
 
       const { nodeLine, opLine } = extractChosenNodeAndOperation(answer);
-      console.log("🤖 Gemini chose node:", nodeLine);
-      console.log("🎯 Gemini chose operation:", opLine);
-      console.log("🔍 Available operations were:", Array.from(allowedOpsSet));
-
       if (opLine && !allowedOpsSet.has(normalize(opLine))) {
-        console.warn("⚠️ Operation not found in allowed list! Possible hallucination.");
+        console.warn("⚠️ Operation not found in allowed list!");
         answer += "\n\n⚠️ Note: Doggie ignored invalid operation suggestion.";
       }
 
@@ -352,11 +429,13 @@ Return in this format for each node:
         builderMode: builder.mode,
         chosenNodes: selectedNodes.map((n) => n.displayName || n.name),
         chosenOperation: opLine || null,
+        builderState: builder,
       });
     }
 
-    // =================== NORMAL CHAT ===================
-    const reasoningContext = getReasoningContext(context, []);
+    // ===========================================================
+    // 💬 NORMAL CHAT MODE
+    // ===========================================================
     const prompt = `
 You are Doggy AI Buddy 🐶.
 User: ${question}
@@ -364,17 +443,14 @@ User: ${question}
 Workflow summary:
 ${workflowSummary || "None"}
 
-${reasoningContext}
-
-Answer concisely, grounded ONLY on DOM and JSON above.
-Never say you don't know; always reason based on visible or known data.
+Answer concisely, grounded ONLY on available node JSON.
+Never hallucinate or invent fields.
 `.trim();
 
     const geminiResponse = await queryGemini("gemini-2.5-flash", prompt, []);
     let answer = geminiResponse?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
     if (!answer || answer.length < 5)
-      answer =
-        "Woof! Based on the visible DOM, I can’t find that exactly — but I’ll guide you step-by-step using what’s on screen 🐾";
+      answer = "Woof! I didn’t find that, but I’ll guide you based on node data 🐾";
 
     res.json({ answer, mode: "normal" });
   } catch (err) {
@@ -382,7 +458,9 @@ Never say you don't know; always reason based on visible or known data.
   }
 });
 
-// =================== START SERVER ===================
-app.listen(port, () =>
-  console.log(`🐶 Doggy AI Buddy backend running at http://localhost:${port}`)
-);
+// ===============================================================
+// 🚀 Start Server
+// ===============================================================
+app.listen(port, () => {
+  console.log(`🐶 Doggy AI Buddy backend running (No DOM, Clean Visual Output) at http://localhost:${port}`);
+});
