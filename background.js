@@ -1,5 +1,8 @@
 console.log("Doggy AI Buddy background worker loaded");
 
+// 🧠 Persist builderState in memory (for @buildone continuity)
+let builderState = null;
+
 async function getApiKey(service) {
   return new Promise((resolve) => {
     chrome.storage.local.get(service, (result) => resolve(result[service]));
@@ -18,6 +21,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         const { debugMode } = await new Promise((resolve) =>
           chrome.storage.local.get("debugMode", resolve)
         );
+
+        // ✅ Reset builder state if starting new workflow
+        if (/^@\s*build/i.test(request.question)) {
+          builderState = null;
+          console.log("🐾 New builder session started");
+        }
 
         // ✅ Fetch workflow summary
         if (request.workflowId && request.baseUrl && apiKey) {
@@ -61,7 +70,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           }
         }
 
-        // ✅ Call /ask with builderState (if set in content.js)
+        // ✅ Call /ask with stored builderState
         const askRes = await fetch("http://localhost:4000/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -72,11 +81,18 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             workflowSummary,
             executionLogs,
             nodeDetails: request.nodeDetails || null,
-            builderState: request.builderState || null, // <-- added builder state passthrough
+            builderState, // 🧠 persist state across calls
           }),
         });
 
         const data = await askRes.json();
+
+        // 🧩 Save updated builder state for continuity
+        if (data.builderState) {
+          builderState = data.builderState;
+          console.log("🐶 Builder state updated:", builderState);
+        }
+
         sendResponse(data);
       } catch (error) {
         console.error("Error fetching LLM response:", error);
@@ -86,7 +102,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true; // 👈 Keeps the message port open
   }
 
-  // 🐕 Fetch workflow
+  // 🐕 FETCH WORKFLOW
   if (request.type === "FETCH_WORKFLOW") {
     (async () => {
       try {
@@ -112,7 +128,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  // 🐾 Fetch logs
+  // 🐾 FETCH LOGS
   if (request.type === "FETCH_LOGS") {
     (async () => {
       try {
@@ -132,7 +148,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
-  // 🐾 Manual node details fetch (still used in sidebar)
+  // 🐾 FETCH NODE DETAILS
   if (request.type === "FETCH_NODE_DETAILS") {
     (async () => {
       try {
@@ -152,3 +168,4 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 });
+
