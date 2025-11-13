@@ -11,8 +11,7 @@ console.log("Doggy AI Buddy content script loaded");
     chrome.runtime.getURL("src/dragHandler.js")
   );
 
-  const { mascot, chatBox } = createChatUI();
-
+  const { chatBox } = createChatUI();
   const chatContainer = chatBox.querySelector("#chatContainer");
   const input = chatBox.querySelector("#userQuestion");
   const askBtn = chatBox.querySelector("#askBtn");
@@ -23,6 +22,9 @@ console.log("Doggy AI Buddy content script loaded");
   const conversationHistory = [];
   let builderState = { active: false, mode: null, goal: "", step: 0, lastWorkflowId: null };
 
+  // ===============================================================
+  // 🧠 Basic Helpers
+  // ===============================================================
   function getWorkflowContextFromUrl() {
     const url = new URL(window.location.href);
     const parts = url.pathname.split("/");
@@ -31,12 +33,15 @@ console.log("Doggy AI Buddy content script loaded");
     return { workflowId, baseUrl };
   }
 
-  async function fetchWorkflowSummary(workflowId, baseUrl) {
-    const apiKey = await new Promise((resolve) => {
+  async function fetchApiKey() {
+    return await new Promise((resolve) => {
       chrome.storage.local.get("n8n", (result) => resolve(result["n8n"]));
     });
+  }
 
-    if (!workflowId || !apiKey) return null;
+  async function fetchWorkflowSummary(workflowId, baseUrl) {
+    const apiKey = await fetchApiKey();
+    if (!workflowId || !apiKey) return "";
 
     try {
       const res = await fetch("http://localhost:4000/summarizeWorkflow", {
@@ -44,16 +49,18 @@ console.log("Doggy AI Buddy content script loaded");
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workflowId, baseUrl, apiKey }),
       });
-      if (!res.ok) return null;
+      if (!res.ok) return "";
       const data = await res.json();
-      return data.summary || null;
-    } catch (err) {
-      console.error("❌ Failed to fetch workflow summary:", err);
-      return null;
+      return data.summary || "";
+    } catch {
+      return "";
     }
   }
 
-  async function fetchNodeDetails(workflowId, baseUrl, apiKey, nodeName) {
+  async function fetchNodeDetails(workflowId, baseUrl, nodeName) {
+    const apiKey = await fetchApiKey();
+    if (!workflowId || !apiKey || !nodeName) return null;
+
     try {
       const res = await fetch("http://localhost:4000/getNodeDetails", {
         method: "POST",
@@ -63,24 +70,22 @@ console.log("Doggy AI Buddy content script loaded");
       if (!res.ok) return null;
       const data = await res.json();
       return data.node || null;
-    } catch (err) {
-      console.error("❌ Failed to fetch node details:", err);
+    } catch {
       return null;
     }
   }
 
   // ===============================================================
-  // 🐾 Send Message to Doggy Backend (via background.js)
+  // ⭐ sendToDoggy: Always sends fresh workflowSummary + snapshot
   // ===============================================================
-  async function sendToDoggy(
-    question,
-    snapshot,
-    workflowId,
-    baseUrl,
-    apiKey,
-    workflowSummary,
-    nodeDetails
-  ) {
+  async function sendToDoggy(question, nodeDetails = null) {
+    const snapshot = getDOMSnapshot();
+    const { workflowId, baseUrl } = getWorkflowContextFromUrl();
+    const apiKey = await fetchApiKey();
+
+    // ALWAYS REFRESH WORKFLOW SUMMARY (fixes your bug)
+    const workflowSummary = await fetchWorkflowSummary(workflowId, baseUrl);
+
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
         {
@@ -93,80 +98,71 @@ console.log("Doggy AI Buddy content script loaded");
           apiKey,
           workflowSummary,
           nodeDetails,
-          builderState, // 🧠 pass local builder state
+          builderState
         },
-        (llmResponse) => {
+        async (llmResponse) => {
           chatContainer.removeChild(chatContainer.lastChild);
 
           if (chrome.runtime.lastError) {
-            console.error("❌ SendMessage failed:", chrome.runtime.lastError.message);
-            displayMessage(chatBox, "ai", "Doggy got disconnected 🐾 (please reload extension).");
+            displayMessage(chatBox, "ai", "Doggy got disconnected 🐾. Reload extension.");
             return resolve(null);
           }
 
-          if (llmResponse?.answer && llmResponse.answer.trim()) {
-            conversationHistory.push({
-              role: "model",
-              parts: [{ text: llmResponse.answer }],
-            });
-            displayMessage(chatBox, "ai", llmResponse.answer);
+          // Show LLM response
+          displayMessage(chatBox, "ai", llmResponse?.answer || "Doggy is confused 🐾");
 
-            // 🧠 Update builder state from backend if returned
-            if (llmResponse.builderState) {
-              builderState = llmResponse.builderState;
-              console.log("🐾 Updated builder state in content.js:", builderState);
-            }
+          // Update history
+          conversationHistory.push({
+            role: "model",
+            parts: [{ text: llmResponse.answer }],
+          });
 
-            resolve(llmResponse.answer);
-          } else {
-            displayMessage(chatBox, "ai", llmResponse?.error || "Doggy didn’t know what to say 🐾");
-            resolve(null);
+          // Update builder state
+          if (llmResponse.builderState) {
+            builderState = llmResponse.builderState;
+            console.log("🐾 Updated builder state:", builderState);
           }
+
+          // Auto-continue (revision fix)
+          if (llmResponse.autoContinue && builderState.active) {
+            console.log("🐶 Auto-continuing...");
+            await sendToDoggy("next");
+          }
+
+          resolve(llmResponse.answer);
         }
       );
     });
   }
 
   // ===============================================================
-  // 🧠 Chat Input Handler
+  // 🧠 MAIN CHAT HANDLER
   // ===============================================================
   askBtn.addEventListener("click", async () => {
-    const raw = input.value;
-    const question = raw.trim();
+    const question = input.value.trim();
     if (!question) return;
 
     displayMessage(chatBox, "user", question);
     input.value = "";
+
     conversationHistory.push({ role: "user", parts: [{ text: question }] });
     displayMessage(chatBox, "ai", "Thinking...");
 
-    const snapshot = getDOMSnapshot();
-    const { workflowId, baseUrl } = getWorkflowContextFromUrl();
-    const apiKey = await new Promise((resolve) => {
-      chrome.storage.local.get("n8n", (result) => resolve(result["n8n"]));
-    });
-    const workflowSummary = await fetchWorkflowSummary(workflowId, baseUrl);
+    const { workflowId } = getWorkflowContextFromUrl();
 
-    // 🐶 Auto-reset builder if workflow changed
+    // Auto-reset builder if workflow changed
     if (builderState.active && workflowId !== builderState.lastWorkflowId) {
       builderState = { active: false, mode: null, goal: "", step: 0, lastWorkflowId: workflowId };
       displayMessage(chatBox, "ai", "🐾 Builder reset (new workflow detected).");
     }
+
     builderState.lastWorkflowId = workflowId;
 
-    let nodeDetails = null;
-    const nodeMatch = question.match(/(?:^|\s)node\s+(.+)/i);
-    if (nodeMatch) {
-      const nodeName = nodeMatch[1].trim();
-      nodeDetails = await fetchNodeDetails(workflowId, baseUrl, apiKey, nodeName);
-    }
-
     // ===============================================================
-    // 🏗️ Builder Mode Controls
+    // 🏗️ Builder Entry Commands
     // ===============================================================
     const qLower = question.toLowerCase();
 
-    // 🐾 @buildone
     if (qLower.startsWith("@buildone")) {
       builderState = {
         active: true,
@@ -175,19 +171,9 @@ console.log("Doggy AI Buddy content script loaded");
         step: 1,
         lastWorkflowId: workflowId,
       };
-      await sendToDoggy(
-        question, // send full question, not "Builder: step 1"
-        snapshot,
-        workflowId,
-        baseUrl,
-        apiKey,
-        workflowSummary,
-        nodeDetails
-      );
-      return;
+      return await sendToDoggy(question);
     }
 
-    // 🐾 @buildall
     if (qLower.startsWith("@buildall")) {
       builderState = {
         active: true,
@@ -196,55 +182,43 @@ console.log("Doggy AI Buddy content script loaded");
         step: 0,
         lastWorkflowId: workflowId,
       };
-      await sendToDoggy(
-        question,
-        snapshot,
-        workflowId,
-        baseUrl,
-        apiKey,
-        workflowSummary,
-        nodeDetails
-      );
-      return;
+      return await sendToDoggy(question);
     }
 
-    // 🐾 Next step
+    // ===============================================================
+    // 🐾 Builder "next"
+    // ===============================================================
     if (builderState.active && builderState.mode === "one" && /^(next|continue|go on)$/i.test(qLower)) {
-      await sendToDoggy(
-        "next", // explicitly tell backend to move to next node
-        snapshot,
-        workflowId,
-        baseUrl,
-        apiKey,
-        workflowSummary,
-        nodeDetails
-      );
-      return;
+      return await sendToDoggy("next");
     }
 
-    // 🐾 Stop building
+    // Stop command
     if (qLower === "stop") {
       builderState = { active: false, mode: null, goal: "", step: 0, lastWorkflowId: workflowId };
-      displayMessage(chatBox, "ai", "🐾 Builder stopped and reset.");
-      console.log("🐶 Builder stopped and reset");
+      displayMessage(chatBox, "ai", "🐾 Builder stopped.");
       return;
     }
 
-    // 🧠 Normal chat mode
-    await sendToDoggy(
-      question,
-      snapshot,
-      workflowId,
-      baseUrl,
-      apiKey,
-      workflowSummary,
-      nodeDetails
-    );
+    // ===============================================================
+    // ⭐ Mid-conversation logic change? → Fetch node details
+    // ===============================================================
+    let autoNodeDetails = null;
+
+    if (builderState.active) {
+      // Try to detect what node this question refers to (implicit)
+      const knownNodes = ["google", "sheet", "openai", "discord", "telegram"];
+      const detected = knownNodes.find((name) => question.toLowerCase().includes(name));
+      if (detected) {
+        autoNodeDetails = await fetchNodeDetails(workflowId, baseUrl, detected);
+      }
+    }
+
+    // ===============================================================
+    // 💬 Normal chat OR builder refinement
+    // ===============================================================
+    await sendToDoggy(question, autoNodeDetails);
   });
 
-  // ===============================================================
-  // 🪟 DOM Event Setup
-  // ===============================================================
   window.addEventListener("load", () => {
     initializeInputListeners(document.querySelectorAll("input, textarea"));
   });
