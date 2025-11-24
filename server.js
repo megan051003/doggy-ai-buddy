@@ -371,6 +371,97 @@ Return ONLY comma-separated node names.
       builder.currentNodeIndex = 0;
     }
 
+
+
+// ===============================================================
+// ⭐ BUILD-ALL MODE — produce entire workflow in one answer
+// ===============================================================
+if (isBuilder && builder.mode === "all") {
+
+  // Collect node definitions in order
+  const selectedNodes = builder.geminiPickedNames.map(name => {
+    let match = allNodes.find(
+      n => normalize(n.displayName || n.name) === normalize(name)
+    );
+    if (!match) {
+      match = allNodes.find(
+        n => normalize(n.displayName || n.name).includes(normalize(name))
+      );
+    }
+    return match;
+  }).filter(Boolean);
+
+  const allowedOps = formatAllowedOps(selectedNodes);
+
+  const fieldSummary = selectedNodes.map((n, idx) => ({
+    step: idx + 1,
+    name: n.displayName || n.name,
+    fields: (n.fields || []).map(f => ({
+      name: f.displayName,
+      type: f.type,
+      desc: f.description,
+      default: f.default || null
+    }))
+  }));
+
+  const buildAllPrompt = `
+You are Doggy AI Buddy 🐶.
+
+User goal: ${builder.goal}
+
+Node sequence (in order):
+${builder.geminiPickedNames.join(" → ")}
+
+Allowed operations:
+${allowedOps}
+
+Node field definitions:
+${JSON.stringify(fieldSummary, null, 2)}
+
+Return the ENTIRE workflow in EXACT format:
+
+Here's your workflow plan 🐶:
+───────────────────────────────
+🐾 Step 1: <friendly name>
+
+Node Name:
+<exact>
+
+Node Type:
+<exact>
+
+Action:
+<exact>
+
+Fields to Fill:
+- <field> → <value>
+
+───────────────────────────────
+🐾 Step 2: ...
+(repeat for all steps)
+───────────────────────────────
+
+NO markdown fences.
+  `.trim();
+
+  const fullRes = await queryGemini("gemini-2.5-flash", buildAllPrompt, history);
+
+  let answer =
+    fullRes?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
+    "Woof! I couldn't build everything 🐾";
+
+  answer = answer.replace(/\*\*/g, "").replace(/\n{3,}/g, "\n\n");
+
+  // Build-all completes immediately
+  builder.active = false;
+
+  return res.json({
+    answer,
+    builderState: builder
+  });
+}
+
+
     // ===============================================================
     // 🏗️ BUILD THE CURRENT STEP
     // ===============================================================
